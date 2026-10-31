@@ -496,6 +496,7 @@ public sealed class FileIoClassifierTests
         Assert.Equal(FileOperation.Delete, ev.Operation);
         Assert.Null(ev.Detail);
         Assert.Equal(0L, ev.Bytes);
+        Assert.Equal(FileEventFlags.None, ev.Flags);
     }
 
     [Theory]
@@ -694,19 +695,23 @@ public sealed class FileIoClassifierTests
 
         Assert.Equal(expected, ev.Operation);
         Assert.Equal(expected == FileOperation.SetInfo ? "delete cancelled" : null, ev.Detail);
+        Assert.Equal(expected == FileOperation.SetInfo ? FileEventFlags.DeleteCancelled : FileEventFlags.None, ev.Flags);
     }
 
-    [Fact]
-    public void SetInfo_DispositionWithoutTheDeleteFlag_IsACancel()
+    [Theory]
+    [InlineData(FileIoClassifier.FileDispositionInformation, 0x0UL)]
+    [InlineData(FileIoClassifier.FileDispositionInformationEx, 0x8UL)] // ON_CLOSE alone clears delete-on-close
+    public void SetInfo_DispositionWithoutTheDeleteFlag_IsACancel(int infoClass, ulong extraInfo)
     {
         PendingIo io = Completed(Io(RawFileOp.SetInfo), status: 0, info: 0);
-        io.InfoClass = FileIoClassifier.FileDispositionInformation;
-        io.ExtraInfo = 0;
+        io.InfoClass = infoClass;
+        io.ExtraInfo = extraInfo;
 
         FileActivityEvent ev = Classify(io);
 
         Assert.Equal(FileOperation.SetInfo, ev.Operation);
         Assert.Equal("delete cancelled", ev.Detail);
+        Assert.Equal(FileEventFlags.DeleteCancelled, ev.Flags);
     }
 
     [Fact]

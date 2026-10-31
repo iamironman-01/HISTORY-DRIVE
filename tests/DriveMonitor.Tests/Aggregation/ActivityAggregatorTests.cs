@@ -212,6 +212,44 @@ public sealed class ActivityAggregatorTests
     }
 
     [Fact]
+    public void CancelledDelete_ClearsDeleted()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Delete, FileA));
+        aggregator.Record(Ev(FileOperation.SetInfo, FileA, flags: FileEventFlags.DeleteCancelled, second: 1));
+
+        FileStatsSnapshot file = FileStats(aggregator, FileA);
+        Assert.Equal(FileLifecycle.None, file.Lifecycle);
+        Assert.Equal(FileOperation.SetInfo, file.LastOperation);
+    }
+
+    [Theory]
+    [InlineData(FileOperation.Create, FileLifecycle.Created)] // a temporary file kept after all
+    [InlineData(FileOperation.Open, FileLifecycle.None)]
+    public void CancelledDeleteOnClose_ClearsDeleted(FileOperation operation, FileLifecycle expected)
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(operation, FileA, flags: FileEventFlags.DeleteOnClose));
+        aggregator.Record(Ev(FileOperation.SetInfo, FileA, flags: FileEventFlags.DeleteCancelled, second: 1));
+
+        Assert.Equal(expected, FileStats(aggregator, FileA).Lifecycle);
+    }
+
+    [Fact]
+    public void DeleteAfterACancelledDelete_MarksDeletedAgain()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Delete, FileA));
+        aggregator.Record(Ev(FileOperation.SetInfo, FileA, flags: FileEventFlags.DeleteCancelled, second: 1));
+        aggregator.Record(Ev(FileOperation.Delete, FileA, second: 2));
+
+        Assert.Equal(FileLifecycle.Deleted, FileStats(aggregator, FileA).Lifecycle);
+    }
+
+    [Fact]
     public void Open_CountsOpensWithoutChangingTheLifecycle()
     {
         var aggregator = new ActivityAggregator();

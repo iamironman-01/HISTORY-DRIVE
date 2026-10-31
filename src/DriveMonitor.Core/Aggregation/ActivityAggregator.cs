@@ -165,6 +165,12 @@ public sealed class ActivityAggregator
                 case FileOperation.SetInfo when file is not null && (ev.Flags & FileEventFlags.SizeChange) != 0:
                     file.Lifecycle |= FileLifecycle.Resized;
                     break;
+
+                // The file is kept after all. This follows the usual single handle: another handle opened with
+                // delete-on-close would still delete it.
+                case FileOperation.SetInfo when file is not null && (ev.Flags & FileEventFlags.DeleteCancelled) != 0:
+                    file.Lifecycle &= ~FileLifecycle.Deleted;
+                    break;
             }
 
             if (file is not null)

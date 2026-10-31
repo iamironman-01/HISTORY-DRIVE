@@ -100,7 +100,7 @@ internal static class FileIoClassifier
                 break;
 
             case RawFileOp.Delete:
-                (operation, detail) = ClassifyDisposition(io);
+                (operation, detail, flags) = ClassifyDisposition(io);
                 break;
 
             case RawFileOp.Rename:
@@ -115,7 +115,7 @@ internal static class FileIoClassifier
                     case FilePositionInformation:
                         return null; // only moves the file pointer
                     case FileDispositionInformation or FileDispositionInformationEx:
-                        (operation, detail) = ClassifyDisposition(io);
+                        (operation, detail, flags) = ClassifyDisposition(io);
                         break;
                     case FileRenameInformation or FileRenameInformationEx:
                         operation = FileOperation.Rename;
@@ -204,9 +204,9 @@ internal static class FileIoClassifier
     /// <summary>
     /// A disposition request carries the requested state in ExtraInfo: the DeleteFile boolean for
     /// FileDispositionInformation, flags for FileDispositionInformationEx. Without the delete bit
-    /// the request cancels a pending delete.
+    /// the request cancels a pending delete, which the DeleteCancelled flag tells the statistics.
     /// </summary>
-    private static (FileOperation Operation, string? Detail) ClassifyDisposition(PendingIo io)
+    private static (FileOperation Operation, string? Detail, FileEventFlags Flags) ClassifyDisposition(PendingIo io)
     {
         bool cancels = io.InfoClass switch
         {
@@ -214,7 +214,9 @@ internal static class FileIoClassifier
             FileDispositionInformationEx => (io.ExtraInfo & FileDispositionDelete) == 0,
             _ => false,
         };
-        return cancels ? (FileOperation.SetInfo, "delete cancelled") : (FileOperation.Delete, null);
+        return cancels
+            ? (FileOperation.SetInfo, "delete cancelled", FileEventFlags.DeleteCancelled)
+            : (FileOperation.Delete, null, FileEventFlags.None);
     }
 
     /// <summary>The reported rename/link target, if it is a DOS path that differs from the old path.</summary>
