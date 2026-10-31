@@ -18,6 +18,9 @@ public sealed partial class MainViewModel
     private bool _logBusy;
     private bool _logErrorReported;
 
+    /// <summary>The last log ended on the thread pool; the shutdown waits for it.</summary>
+    private Task? _logStopTask;
+
     /// <summary>True while every event is also written to a CSV log.</summary>
     public bool IsLogging => _engine.Log is not null;
 
@@ -209,7 +212,9 @@ public sealed partial class MainViewModel
             else
             {
                 // Waits for the writer to flush, which can take a moment on a slow disk.
-                await Task.Run(_engine.StopLog);
+                Task stop = Task.Run(_engine.StopLog);
+                _logStopTask = stop;
+                await stop;
                 CloseBanner(BannerKeys.Log);
             }
         }
@@ -244,7 +249,9 @@ public sealed partial class MainViewModel
         _toggleLogCommand.RaiseCanExecuteChanged();
         try
         {
-            await Task.Run(_engine.StopLog);
+            Task stop = Task.Run(_engine.StopLog);
+            _logStopTask = stop;
+            await stop;
         }
         catch (Exception ex)
         {

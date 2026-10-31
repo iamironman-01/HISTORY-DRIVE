@@ -28,9 +28,10 @@ public enum MonitorState
 /// </summary>
 /// <remarks>
 /// Everything here runs on the UI thread. Engine events arrive on worker threads and are posted with
-/// BeginInvoke; starting and stopping the kernel session and all file I/O run on the thread pool.
+/// BeginInvoke; starting and stopping the kernel session and all file I/O run on the thread pool, and so
+/// does the shutdown when the window closes (<see cref="ShutDownAsync"/>).
 /// </remarks>
-public sealed partial class MainViewModel : ObservableObject, IDisposable
+public sealed partial class MainViewModel : ObservableObject
 {
     private const int DrainBatch = 50_000;
     private static readonly TimeSpan TickInterval = TimeSpan.FromMilliseconds(250);
@@ -49,9 +50,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly RelayCommand _startStopCommand;
     private readonly RelayCommand _toggleLogCommand;
     private Task? _lifecycleTask;
+    private Task? _shutDown;
     private MonitorState _state = MonitorState.Stopped;
     private bool _isBusy;
+
+    /// <summary>Set when the shutdown starts: from then on nothing starts again and nothing updates the view.</summary>
     private bool _disposed;
+    private bool _closeRequested;
     private string? _lastError;
     private string? _lastTickError;
     private long _lastTickErrorTick;
@@ -86,14 +91,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Processes = new StatsTable<(int, string), ProcessStatsSnapshot, ProcessRowViewModel>(
             s => (s.ProcessId, s.ProcessName), s => new ProcessRowViewModel(s), (row, s) => row.Update(s), _filter.AcceptsProcess);
 
-        _startStopCommand = new RelayCommand(ToggleMonitoring, () => !_isBusy && _isElevated);
-        _toggleLogCommand = new RelayCommand(ToggleLog, () => !_logBusy);
+        // The commands that start something are off once the window is closing (ShutDownAsync). An export, for one,
+        // could still be writing its file when the window closes and the process ends.
+        _startStopCommand = new RelayCommand(ToggleMonitoring, () => !_isBusy && _isElevated && !_disposed);
+        _toggleLogCommand = new RelayCommand(ToggleLog, () => !_logBusy && !_disposed);
         StartStopCommand = _startStopCommand;
         ToggleLogCommand = _toggleLogCommand;
         ClearCommand = new RelayCommand(Clear);
-        ExportActivityCommand = new RelayCommand(ExportActivity);
-        ExportFilesCommand = new RelayCommand(ExportFiles);
-        ExportProcessesCommand = new RelayCommand(ExportProcesses);
+        ExportActivityCommand = new RelayCommand(ExportActivity, () => !_disposed);
+        ExportFilesCommand = new RelayCommand(ExportFiles, () => !_disposed);
+        ExportProcessesCommand = new RelayCommand(ExportProcesses, () => !_disposed);
         OpenLogsFolderCommand = new RelayCommand(OpenLogsFolder);
         ClearSearchCommand = new RelayCommand(() => SetSearchNow(""));
         CopyPathCommand = new RelayCommand(CopyPaths);
@@ -104,6 +111,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _engine.StateChanged += OnEngineStateChanged;
         _engine.Faulted += OnEngineFaulted;
         _engine.Restarted += OnEngineRestarted;
+        DisposeEngine = _engine.Dispose;
 
         _tickTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = TickInterval };
         _tickTimer.Tick += OnTick;
@@ -116,11 +124,23 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         UpdateCounts();
     }
 
-    /// <summary>Asks the window to close (after "Restart as administrator" started the elevated copy).</summary>
+    /// <summary>
+    /// Asks the window to close: after "Restart as administrator" started the elevated copy, or once the shutdown that
+    /// a close had to wait for is done (<see cref="TryClose"/>).
+    /// </summary>
     public event EventHandler? CloseRequested;
 
     /// <summary>The settings object that is saved on exit; the window stores its bounds here.</summary>
     public AppSettings Settings => _settings;
+
+    /// <summary>
+    /// The last step of the shutdown, on the thread pool: <see cref="MonitorEngine.Dispose"/>, which ends the activity log
+    /// and on a slow drive waits for it. Tests wrap it to hold the shutdown there.
+    /// </summary>
+    internal Action DisposeEngine { get; set; }
+
+    /// <summary>The engine; tests start their logs on it, outside the logs folder that Record log uses.</summary>
+    internal MonitorEngine Engine => _engine;
 
     public ObservableCollection<BannerViewModel> Banners { get; } = [];
 
@@ -449,12 +469,55 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             ShowBanner(BannerKeys.Unexpected, BannerKind.Error, "Something went wrong in the background: " + error.Message);
     }
 
-    /// <summary>Stops timers and the kernel session. The engine stops even if a start is still in progress.</summary>
-    public void Dispose()
+    /// <summary>
+    /// Called when the window is asked to close. True once monitoring has stopped and the activity log is saved, so
+    /// the window can close. Before that it starts the shutdown (<see cref="ShutDownAsync"/>) and returns false: the
+    /// window stays open, and <see cref="CloseRequested"/> asks it to close again when the shutdown is done. Further
+    /// calls meanwhile start nothing new.
+    /// </summary>
+    public bool TryClose()
     {
-        if (_disposed)
-            return;
+        Task shutDown = ShutDownAsync();
+        if (shutDown.IsCompleted)
+            return true;
+
+        if (!_closeRequested)
+        {
+            _closeRequested = true;
+            _ = RequestCloseWhenShutDownAsync(shutDown);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Stops the timers, the kernel session and the activity log, once. Saving the log waits for its drive, up to
+    /// 30 s for a slow one, so the stopping runs on the thread pool; meanwhile the commands that start something are
+    /// off and a banner says that the log is being saved. Later calls return the same task, which never fails.
+    /// </summary>
+    public Task ShutDownAsync()
+    {
+        if (_shutDown is { } running)
+            return running;
+
         _disposed = true;
+        bool stopping = _isBusy || _engine.IsRunning;
+        bool savingLog = _logBusy || _engine.Log is not null;
+        Task? lifecycle = _lifecycleTask;
+        Task? logStop = _logStopTask;
+
+        // Started before the view is updated, so that nothing failing there can keep the kernel session running.
+        _shutDown = Task.Run(() =>
+        {
+            try
+            {
+                StopEverything(lifecycle, logStop);
+            }
+            catch (Exception ex)
+            {
+                ErrorLog.Write(ex, "shutdown");
+            }
+        });
 
         _tickTimer.Stop();
         _searchTimer.Stop();
@@ -463,17 +526,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _engine.Faulted -= OnEngineFaulted;
         _engine.Restarted -= OnEngineRestarted;
 
-        // A start still running on the thread pool would otherwise create the session after Stop ran.
-        try
-        {
-            _lifecycleTask?.Wait(LifecycleWaitOnExit);
-        }
-        catch (AggregateException)
-        {
-            // A failed start or stop; nothing more to undo.
-        }
+        // Greys out the buttons of the commands that start something; they stay off from now on.
+        foreach (ICommand command in new[] { StartStopCommand, ToggleLogCommand, ExportActivityCommand, ExportFilesCommand, ExportProcessesCommand })
+            ((RelayCommand)command).RaiseCanExecuteChanged();
 
-        _engine.Dispose();
+        if (stopping)
+            SetState(MonitorState.Stopping);
+        if (savingLog)
+            ShowBanner(BannerKeys.Closing, BannerKind.Info, "Saving the activity log… DriveMonitor closes when it is done.");
+
+        return _shutDown;
     }
 
     /// <summary>
@@ -757,6 +819,43 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>The thread-pool part of <see cref="ShutDownAsync"/>.</summary>
+    private void StopEverything(Task? lifecycle, Task? logStop)
+    {
+        // A start still running would otherwise create the session after the stop below.
+        WaitQuietly(lifecycle, LifecycleWaitOnExit);
+
+        // The kernel session first, because it outlives the process: while Windows logs off, App waits only briefly
+        // for this before the process may be ended.
+        _engine.Stop();
+
+        // A log that "Record log" is still saving is no longer the engine's, so Dispose would not wait for it. Saving
+        // a log takes at most about half a minute; see CsvActivityLog.Dispose.
+        WaitQuietly(logStop, Timeout.InfiniteTimeSpan);
+        DisposeEngine();
+    }
+
+    private static void WaitQuietly(Task? task, TimeSpan timeout)
+    {
+        try
+        {
+            task?.Wait(timeout);
+        }
+        catch (AggregateException)
+        {
+            // A failed start or stop, reported where it ran; nothing more to undo.
+        }
+    }
+
+    private async Task RequestCloseWhenShutDownAsync(Task shutDown)
+    {
+        await shutDown;
+
+        // As a dispatcher operation of its own: a shutdown that has just finished continues here at once, inside the
+        // window's Closing, where the window cannot be closed again.
+        await _dispatcher.InvokeAsync(() => CloseRequested?.Invoke(this, EventArgs.Empty), DispatcherPriority.Normal);
+    }
+
     private void SetBusy(MonitorState transition)
     {
         _isBusy = true;
@@ -771,10 +870,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _startStopCommand.RaiseCanExecuteChanged();
     }
 
-    /// <summary>Shows the engine's state, unless a start or stop is still running.</summary>
+    /// <summary>Shows the engine's state, unless a start or stop is still running or the window is closing.</summary>
     internal void UpdateState()
     {
-        if (_isBusy)
+        if (_isBusy || _disposed)
             return;
         SetState(_engine.IsRunning ? MonitorState.Monitoring : _lastError is not null ? MonitorState.Error : MonitorState.Stopped);
     }
@@ -893,6 +992,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         public const string Admin = "admin";
         public const string StartError = "start-error";
         public const string StartWarning = "start-warning";
+        public const string Closing = "closing";
         public const string Faulted = "faulted";
         public const string Restarted = "restarted";
         public const string Unexpected = "unexpected";

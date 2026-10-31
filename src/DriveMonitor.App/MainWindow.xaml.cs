@@ -88,6 +88,12 @@ public partial class MainWindow : Window
 
         // While the window still has its handle.
         _deviceWatcher?.Dispose();
+
+        // Stopping the kernel session and saving the activity log can take a while, up to 30 s on a slow drive. The
+        // view model does that on the thread pool while the window stays open and responsive, then asks to close it
+        // again. When the application itself shuts down (Windows logging off), WPF closes the window anyway.
+        if (!_viewModel.TryClose())
+            e.Cancel = true;
     }
 
     protected override void OnClosed(EventArgs e)
