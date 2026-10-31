@@ -123,6 +123,27 @@ dotnet publish src/DriveMonitor.App/DriveMonitor.App.csproj -c Release -r win-x6
 dotnet publish src/DriveMonitor.Cli/DriveMonitor.Cli.csproj -c Release -r win-x64 --self-contained false -o publish/DriveMonitor
 ```
 
+#### Self-contained builds (no .NET runtime needed)
+
+Publish profiles produce a single executable that carries its own .NET runtime, for machines where the
+.NET 9 Desktop Runtime is not installed:
+
+```powershell
+dotnet publish src/DriveMonitor.App/DriveMonitor.App.csproj -p:PublishProfile=win-x64-selfcontained
+dotnet publish src/DriveMonitor.Cli/DriveMonitor.Cli.csproj -p:PublishProfile=win-x64-selfcontained
+```
+
+The results are in each project's `bin\publish\win-x64-selfcontained\` folder: `DriveMonitor.exe` (about
+120 MB) or `drivemon.exe` (about 70 MB), plus an `amd64\` folder with TraceEvent's native DLLs. Keep that
+folder next to the executable; TraceEvent loads the DLLs from there to start the kernel session. The profiles
+are:
+
+| Profile | Result |
+| --- | --- |
+| `win-x64` | Framework-dependent folder, like the CI build; needs the .NET 9 Desktop Runtime (x64). |
+| `win-x64-selfcontained` | Single executable for x64, runtime included. |
+| `win-arm64-selfcontained` | Single executable for ARM64 Windows, runtime included (native DLLs in `arm64\`). |
+
 [CONTRIBUTING.md](CONTRIBUTING.md) has the full developer workflow.
 
 ## Using the app
@@ -212,7 +233,7 @@ reports new names of renamed files, failed operations and the log file.
 
 ## Using the CLI
 
-`drivemon.exe` needs an administrator terminal, except for `--list` and `--help`. It monitors until you
+`drivemon.exe` needs an administrator terminal, except for `--list`, `--version` and `--help`. It monitors until you
 press Ctrl+C or the `--duration` ends, then (unless `--no-summary` is given) prints totals per drive, the 20
 busiest files and the kernel counters.
 
@@ -237,6 +258,7 @@ drivemon --self-test [E:]       Verify capture on a drive (uses a temporary fold
 | `--no-summary` | Do not print per-file totals on exit. |
 | `--report FILE` | Self-test: also save the report to FILE. |
 | `-h`, `--help`, `/?` | Show help. |
+| `--version` | Print the version and the commit it was built from, for example `drivemon 0.1.0+<commit>`, and exit. |
 
 Options are not case-sensitive. The exit code is 0 on success, 1 when monitoring could not start or the
 self-test failed, and 2 for invalid options.
