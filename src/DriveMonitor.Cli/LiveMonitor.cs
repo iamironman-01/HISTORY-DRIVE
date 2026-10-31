@@ -31,6 +31,10 @@ internal static class LiveMonitor
             CaptureDirectoryListings = options.ShowListings,
         });
 
+        // A crash on a worker thread, such as the engine's release timer, runs neither finally blocks nor
+        // ProcessExit handlers, and the kernel session would outlive the process.
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => StopQuietly(engine);
+
         // Without --drives the default selection is kept up to date, so that a pendrive plugged in while
         // drivemon runs is monitored too, as the app does.
         DriveWatcher? watcher = null;
@@ -138,6 +142,19 @@ internal static class LiveMonitor
         {
             error.WriteLine($"Cannot write the CSV file: {ex.Message}");
             return false;
+        }
+    }
+
+    /// <summary>Stops the session and closes the CSV log while the process dies.</summary>
+    private static void StopQuietly(MonitorEngine engine)
+    {
+        try
+        {
+            engine.Dispose();
+        }
+        catch (Exception)
+        {
+            // The process is ending; there is nothing left to try.
         }
     }
 
