@@ -1,0 +1,151 @@
+name: Bug report
+description: DriveMonitor or drivemon does not work as documented.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Please check the [troubleshooting guide](https://github.com/iamironman-01/HISTORY-DRIVE/blob/main/docs/TROUBLESHOOTING.md) first: it covers Smart App Control, administrator rights, the error messages, and lost or unnamed events.
+
+        Do not report security vulnerabilities here; follow the [security policy](https://github.com/iamironman-01/HISTORY-DRIVE/blob/main/SECURITY.md) instead.
+
+        Paths and program names in reports and logs can be private. Remove anything you do not want to publish.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect to see instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        The exact steps, starting from launching the app or drivemon. For drivemon, include the full command
+        line.
+      placeholder: |
+        1. Start DriveMonitor.exe and approve the administrator prompt.
+        2. Plug in the pendrive; it gets the letter E:.
+        3. Copy a 100 MB file to E:\.
+        4. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part?
+      options:
+        - The app (DriveMonitor.exe)
+        - drivemon (command line)
+        - drivemon --self-test
+        - Building or testing from source
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: DriveMonitor build
+      description: >-
+        The release version, the link to the CI run you downloaded the zip from, or the commit you built
+        (git rev-parse --short HEAD).
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows edition, version and build
+      description: Run winver and copy what it shows.
+      placeholder: Windows 11 Home, version 24H2, OS build 26100.4061
+    validations:
+      required: true
+
+  - type: dropdown
+    id: drive-type
+    attributes:
+      label: Drive type
+      description: The drive or drives where the problem happens.
+      multiple: true
+      options:
+        - USB pendrive
+        - Memory card (SD, microSD)
+        - External USB hard disk or SSD
+        - Internal secondary disk (SATA, NVMe)
+        - The Windows drive
+        - Network drive
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: file-system
+    attributes:
+      label: File system
+      description: Shown in the FS column of drivemon --list, or in the drive's properties in File Explorer.
+      multiple: true
+      options:
+        - FAT32
+        - exFAT
+        - NTFS
+        - ReFS
+        - Other or unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: drive-list
+    attributes:
+      label: Output of drivemon --list
+      render: text
+
+  - type: textarea
+    id: self-test
+    attributes:
+      label: Self-test output
+      description: >-
+        From an administrator terminal, run drivemon --self-test X: --report selftest.txt, where X: is the
+        affected drive (from a clone of the repository, ./scripts/Invoke-SelfTest.ps1 -Drive X does the
+        same), and paste the report, at least the Checks section and the RESULT line. If you cannot run it,
+        write why, for example Smart App Control or no administrator rights.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: errors-log
+    attributes:
+      label: errors.log (app only)
+      description: >-
+        The app writes unexpected errors to %LOCALAPPDATA%\DriveMonitor\errors.log. Paste the entries from
+        the time of the problem, or write that the file is missing or empty.
+      render: text
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Status bar diagnostics (app only)
+      description: >-
+        Hover over the monitoring state in the status bar and write down what the tooltip says (or attach a
+        screenshot), together with the Lost, Dropped and Unnamed counts.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: >-
+        Antivirus or other monitoring tools that were running, screenshots, or an excerpt of the CSV log.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched the existing issues for this problem.
+          required: true
+        - label: I removed paths, file names and program names that I do not want to publish.
