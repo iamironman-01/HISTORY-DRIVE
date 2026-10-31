@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest an improvement to DriveMonitor or drivemon.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the suggestion. The [README](https://github.com/iamironman-01/HISTORY-DRIVE/blob/main/README.md) lists what DriveMonitor does today and its known limitations.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: Describe the behaviour you want, for example the option, column or command you have in mind.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part?
+      multiple: true
+      options:
+        - The app (DriveMonitor.exe)
+        - drivemon (command line)
+        - The engine (DriveMonitor.Core)
+        - Documentation
+        - Build or CI
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds you use now, or other ways to solve the problem.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Screenshots, examples, or other tools that do this well.
