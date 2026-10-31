@@ -8,6 +8,9 @@ public sealed class ProcessNameCacheTests
     /// <summary>A multiple of 4 like every real process id, but far beyond any id Windows hands out.</summary>
     private const int MissingProcessId = int.MaxValue - 3;
 
+    /// <summary>Stands in for the image path query of a process that cannot be opened.</summary>
+    private static readonly Func<int, string?> NoImagePath = _ => null;
+
     [Theory]
     [InlineData(@"\Device\HarddiskVolume3\Windows\explorer.exe", "explorer.exe")]
     [InlineData(@"C:\Windows\System32\notepad.exe", "notepad.exe")]
@@ -109,6 +112,51 @@ public sealed class ProcessNameCacheTests
         string expected = Path.GetFileName(Environment.ProcessPath!);
 
         Assert.Equal(expected, cache.Resolve(Environment.ProcessId, "hint.exe"), ignoreCase: true);
+    }
+
+    [Theory]
+    [InlineData("evil.exe\r\u001b[2K", "evil.exe??[2K")] // return to column 0, then erase the line
+    [InlineData("a\nb\u000bc\u000cd\u0000e.exe", "a?b?c?d?e.exe")]
+    [InlineData("bell\u0007 back\b del\u007f.exe", "bell? back? del?.exe")]
+    [InlineData("next\u0085 csi\u009b.exe", "next? csi?.exe")] // C1 controls, including the 8-bit escape sequence start
+    [InlineData("invoice\u202Etxt.exe", "invoice?txt.exe")] // right-to-left override: shows as "invoiceexe.txt"
+    [InlineData("\u202A\u202B\u202C\u202Dx.exe", "????x.exe")]
+    [InlineData("\u2066x\u2067y\u2068z\u2069.exe", "?x?y?z?.exe")]
+    [InlineData("\u200Emarks\u200F\u061C.exe", "?marks??.exe")]
+    [InlineData("line\u2028paragraph\u2029.exe", "line?paragraph?.exe")]
+    public void EveryNameSource_ReplacesEachControlAndBidiCharacterWithAQuestionMark(string name, string expected)
+    {
+        var started = new ProcessNameCache(NoImagePath);
+        var queried = new ProcessNameCache(_ => @"C:\Tools\" + name);
+        var hinted = new ProcessNameCache(NoImagePath);
+
+        started.OnProcessStarted(1000, @"\Device\HarddiskVolume3\Tools\" + name);
+
+        Assert.Equal(expected, started.TryGet(1000));
+        Assert.Equal(expected, started.Resolve(1000, "hint.exe"));
+        Assert.Equal(expected, queried.Resolve(1000, "hint.exe"));
+        Assert.Equal(expected, queried.TryGet(1000)); // stored as returned
+        Assert.Equal(expected, hinted.Resolve(1000, name));
+        Assert.Equal(expected, hinted.TryGet(1000));
+    }
+
+    [Theory]
+    [InlineData("explorer.exe")]
+    [InlineData("R\u00e9sum\u00e9 \u2013 \u6771\u4eac \U0001F4C1.exe")] // accents, a dash, CJK, an emoji (surrogate pair)
+    [InlineData("\u05e9\u05dc\u05d5\u05dd \u0645\u0631\u062d\u0628\u0627.exe")] // right-to-left letters are text, not formatting
+    [InlineData("Setup (x64) [v2] {beta} #1 & 50% off.exe")]
+    public void EveryNameSource_KeepsAnOrdinaryNameAsItIs(string name)
+    {
+        var started = new ProcessNameCache(NoImagePath);
+        var queried = new ProcessNameCache(_ => @"C:\Tools\" + name);
+        var hinted = new ProcessNameCache(NoImagePath);
+
+        started.OnProcessStarted(1000, @"C:\Tools\" + name);
+
+        Assert.Equal(name, started.TryGet(1000));
+        Assert.Equal(name, queried.Resolve(1000, "hint.exe"));
+        Assert.Equal(name, hinted.Resolve(1000, name));
+        Assert.Same(name, ProcessNameCache.SafeName(name)); // checked without a copy
     }
 
     [Fact]
