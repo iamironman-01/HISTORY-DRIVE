@@ -58,7 +58,8 @@ internal static class Program
             string size = d.IsReady ? Formatting.Bytes(d.TotalBytes) : "-";
             string free = d.IsReady ? Formatting.Bytes(d.FreeBytes) : "-";
             string monitored = DriveCatalog.IsMonitoredByDefault(d) ? "yes" : d.IsSystemDrive ? "(system)" : "no";
-            string description = string.Join(" | ", new[] { d.Label, d.Model, d.DevicePath }.Where(s => !string.IsNullOrEmpty(s)));
+            // The label comes from whoever formatted the drive, the model from the device itself.
+            string description = ConsoleText.Clean(string.Join(" | ", new[] { d.Label, d.Model, d.DevicePath }.Where(s => !string.IsNullOrEmpty(s))));
             Console.WriteLine($"{d.Letter + ":",-6}{d.Kind,-11}{d.Bus,-9}{d.FileSystem ?? "-",-7}{size,10}{free,10}  {monitored,-8} {description}");
         }
     }

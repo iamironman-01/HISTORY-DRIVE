@@ -136,7 +136,8 @@ internal static class LiveMonitor
             {
                 string lifecycle = f.Lifecycle == FileLifecycle.None ? "" : $" [{f.Lifecycle}]";
                 Console.WriteLine(
-                    $"  R {Formatting.Bytes(f.BytesRead),9}  W {Formatting.Bytes(f.BytesWritten),9}  {f.Path}{lifecycle}  ({f.Processes})");
+                    $"  R {Formatting.Bytes(f.BytesRead),9}  W {Formatting.Bytes(f.BytesWritten),9}  " +
+                    $"{ConsoleText.Clean(f.Path)}{lifecycle}  ({ConsoleText.Clean(f.Processes)})");
             }
         }
 
@@ -147,7 +148,8 @@ internal static class LiveMonitor
         if (engine.CallbackErrors > 0 || engine.Restarts > 0)
         {
             Console.WriteLine(
-                $"Callback errors: {engine.CallbackErrors:N0} (last: {engine.LastCallbackError ?? "-"})  session restarts: {engine.Restarts}");
+                $"Callback errors: {engine.CallbackErrors:N0} (last: {ConsoleText.Clean(engine.LastCallbackError ?? "-")})  " +
+                $"session restarts: {engine.Restarts}");
         }
     }
 }
@@ -178,26 +180,33 @@ internal sealed class EventPrinter(CliOptions options)
         if (!ShouldShow(ev))
             return;
 
-        var line = new StringBuilder(160);
-        line.Append(ev.Timestamp.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)).Append("  ");
-        Console.Write(line.ToString());
+        Console.Write(ev.Timestamp.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + "  ");
 
         ConsoleColor previous = Console.ForegroundColor;
         Console.ForegroundColor = ev.Status == IoStatus.Failed ? ConsoleColor.DarkGray : ColorFor(ev.Operation);
         Console.Write(ev.Operation.ToString().ToUpperInvariant().PadRight(8));
         Console.ForegroundColor = previous;
 
-        line.Clear();
+        Console.WriteLine(Describe(ev));
+    }
+
+    /// <summary>
+    /// The line after the operation column. The path, the process name (from a command line) and the detail
+    /// (listing patterns, rename targets) are chosen by other users, so they are cleaned before printing.
+    /// </summary>
+    internal static string Describe(FileActivityEvent ev)
+    {
+        var line = new StringBuilder(160);
         line.Append(ev.Operation is FileOperation.Read or FileOperation.Write ? Formatting.Bytes(ev.Bytes).PadLeft(9) : new string(' ', 9));
-        line.Append("  ").Append(ev.Path);
+        line.Append("  ").Append(ConsoleText.Clean(ev.Path));
         if (ev.Offset >= 0 && ev.Operation is FileOperation.Read or FileOperation.Write)
             line.Append("  @").Append(ev.Offset.ToString("N0", CultureInfo.CurrentCulture));
-        line.Append("  ").Append(ev.ProcessName).Append(" (").Append(ev.ProcessId).Append(')');
+        line.Append("  ").Append(ConsoleText.Clean(ev.ProcessName)).Append(" (").Append(ev.ProcessId).Append(')');
         if (ev.IsPaging)
             line.Append("  [paging]");
         if (ev.Detail is not null)
-            line.Append("  ").Append(ev.Detail);
-        Console.WriteLine(line.ToString());
+            line.Append("  ").Append(ConsoleText.Clean(ev.Detail));
+        return line.ToString();
     }
 
     private static ConsoleColor ColorFor(FileOperation operation) => operation switch
