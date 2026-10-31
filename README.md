@@ -22,8 +22,8 @@ For each file operation on the drives you choose, DriveMonitor shows:
 | Whether it worked, and why not | `failed: access denied`, `failed: write protected`, `failed: disk full` |
 | What happened | `created`, `overwritten`, `size → 1,000 bytes`, `→ E:\photos\holiday.jpg`, `moved to the Recycle Bin` |
 
-It also keeps running totals per file, per drive and per program, and the app notices when a pendrive is
-plugged in and starts watching it automatically.
+It also keeps running totals per file, per drive and per program. The app, and `drivemon` unless you name the
+drives with `--drives`, notice when a pendrive is plugged in and start watching it automatically.
 
 ### How it works
 
@@ -159,8 +159,9 @@ that off). Only one DriveMonitor window runs per Windows session.
   which fixed disks you untick and whether you watch the Windows drive. A drive that is removed stays in
   the list as *Disconnected*, with its totals.
 - When a pendrive, memory card or other external drive is plugged in while DriveMonitor runs, a notice
-  appears. With **Monitor new USB drives automatically** on, the drive is ticked right away; otherwise the
-  notice offers **Monitor it**.
+  appears. With **Monitor new USB drives automatically** on, the drive is ticked right away, and its activity
+  is captured from the moment Windows reports the new volume, before the drive appears in the list; otherwise
+  the notice offers **Monitor it**.
 - **Show** chooses which operations appear in Live activity. Reads, Writes, Created, Deleted and Renamed
   are on by default; Opens, Folder listings, Other changes (attributes, timestamps, size changes and
   flushes), Paging I/O and Failed operations are off. These choices only filter the Live activity list,
@@ -179,9 +180,11 @@ that off). Only one DriveMonitor window runs per Windows session.
 - **Clear** empties all tables and totals.
 - **Export** saves Live activity (the rows currently visible), Files or Processes as a CSV file.
 - **Record log** writes every event to a CSV file in `%LOCALAPPDATA%\DriveMonitor\Logs` until you turn it
-  off. The arrow next to it has **Open logs folder**.
+  off, or until the drive runs short of space (see [Record log and export](#record-log-and-export)). The
+  arrow next to it has **Open logs folder**.
 - The **search box** (Ctrl+F, Esc to clear) shows only the rows whose path or process name contains the
-  text, in all three tabs.
+  text, in all three tabs. In Files it also matches the new name of a renamed file and every program that
+  used the file, not only the three in the Processes column.
 
 ### Tabs
 
@@ -197,15 +200,18 @@ that off). Only one DriveMonitor window runs per Windows session.
 - **Processes**: totals per program: reads, writes, bytes, files created, deleted and renamed, and how many
   files it touched. Paging I/O is not attributed to programs.
 
-Click a column header to sort, click again to reverse, and a third time to return to arrival order.
+Click a column header to sort, click again to reverse, and a third time to return to arrival order. In a
+sorted table, rows whose values change move to their new place about once a second.
 Right-click rows to copy their paths, open the containing folder, or filter to that file or process.
 Double-click a row to open its folder in File Explorer (in Processes: to filter to that program).
 
 ### Grouping
 
 With **Group repeated operations** on (the default), repeated reads, writes, opens, folder listings,
-metadata changes and flushes share one row when they have the same file, process, paging flag and outcome
-and each comes within a second of the previous one. The Count column then shows how many there were
+metadata changes and flushes share one row when they have the same file, process, paging flag, outcome,
+NTSTATUS code and detail, and each comes within a second of the previous one. Two different failures, or a
+timestamp change and a hard link, therefore get rows of their own, while the size changes of a file share a
+row whatever the new size, and the row shows the latest size. The Count column then shows how many there were
 (`×24`). Creates, deletes and renames always get a row of their own.
 
 ### Status bar
@@ -224,6 +230,13 @@ reports new names of renamed files, failed operations and the log file.
 - **Record log** files are named `activity-YYYYMMDD-HHMMSS.csv` and have one row per event, with the
   columns Time, Operation, Path, Drive, Bytes, Offset, Process, PID, TID, Flags, Status, NtStatus, Detail
   and Target.
+- A recording has limits, so that it cannot fill the Windows drive. When its file reaches 100 MB, it
+  continues in `activity-YYYYMMDD-HHMMSS.002.csv`, then `.003.csv` and so on, each with its own header row.
+  It keeps its 10 newest files and deletes the older ones of the same recording. It does not start, or
+  stops, when less than 512 MB is free on the drive: a banner says *Could not start the activity log: ...*
+  or *The activity log stopped: ...*, and **Record log** turns off. DriveMonitor never deletes earlier
+  recordings. What to do when a log stops:
+  [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#the-activity-log-stops-or-is-split-into-several-files).
 - **Export → Live activity** saves the visible rows as they are grouped, with first and last time, count,
   total bytes and the range of offsets. **Files** and **Processes** exports save every row, whatever the
   search box contains.
@@ -245,23 +258,35 @@ drivemon --self-test [E:]       Verify capture on a drive (uses a temporary fold
 
 | Option | Meaning |
 | --- | --- |
-| `-d`, `--drives E,F` | Drives to monitor. Separate letters with commas, semicolons or spaces; `E`, `E:` and `E:\` all work. Default: the drives `--list` marks as monitored by default, which is every drive except the Windows drive and network drives. |
+| `-d`, `--drives E,F` | Drives to monitor. Separate letters with commas, semicolons or spaces; `E`, `E:` and `E:\` all work. Default: the drives `--list` marks as monitored by default, which is every drive except the Windows drive and network drives, and such drives plugged in while `drivemon` runs. |
 | `--system` | Also monitor the Windows drive. Ignored together with `--drives`; name the drive in that list instead. |
 | `--opens` | Show file opens. |
 | `--listings` | Show folder listings. Without this option they are not captured at all. |
 | `--other` | Show metadata changes and flushes. |
 | `--paging` | Show paging I/O from the cache and memory manager. |
 | `--failed` | Show failed operations. |
-| `--csv FILE` | Also write every event to a CSV file, including the ones the screen does not show. Same columns as the app's Record log. |
-| `-t`, `--duration SEC` | Stop after SEC seconds, for example `60` or `2.5` (default: until Ctrl+C). |
+| `--csv FILE` | Also write every event to a CSV file, including the ones the screen does not show. Same columns and limits as the app's Record log: `activity.csv` continues in `activity.002.csv` and so on every 100 MB, the 10 newest files are kept, and the log stops when less than 512 MB is free on its drive. |
+| `-t`, `--duration SEC` | Stop after SEC seconds, for example `60` or `2.5`: more than 0 and at most 31536000 (365 days). Default: until Ctrl+C. |
 | `-q`, `--quiet` | Do not print individual events. |
 | `--no-summary` | Do not print per-file totals on exit. |
 | `--report FILE` | Self-test: also save the report to FILE. |
 | `-h`, `--help`, `/?` | Show help. |
 | `--version` | Print the version and the commit it was built from, for example `drivemon 0.1.0+<commit>`, and exit. |
 
-Options are not case-sensitive. The exit code is 0 on success, 1 when monitoring could not start or the
-self-test failed, and 2 for invalid options.
+Options are not case-sensitive. The exit code is 0 on success; 1 when monitoring could not start (including
+a `--csv` file that cannot be written) or the self-test failed or was cancelled; and 2 for invalid options,
+such as a `--duration` out of range.
+
+Without `--drives`, `drivemon` keeps its selection up to date while it runs. Every 200 ms it checks whether a
+drive letter came or went, and every 10 seconds it reads the drive list anyway. It adds each new drive of the
+default selection and prints `Now monitoring F: STICK (SanDisk Ultra)`, also with `--quiet`. The start line
+then reads `Monitoring E: and drives plugged in later`, or `Waiting for a drive to be plugged in` when there
+is none yet. A drive that is pulled out stays selected, so it is monitored again when it comes back.
+
+If the `--csv` file cannot be created, for example because another program has it open or its drive has less
+than 512 MB free, `drivemon` prints `Cannot write the CSV file: <reason>` and exits with code 1 before
+monitoring starts. A log that stops later, because its drive runs short of space or is removed, is not
+reported: monitoring goes on, and the CSV file ends at that point.
 
 ```powershell
 drivemon --list
@@ -290,6 +315,9 @@ DELETE, RENAME, SETINFO (metadata changes), FLUSH and LIST. For example:
 ```
 
 By default `drivemon` prints reads, writes, creates, deletes and renames; the options above add the rest.
+Control characters and Unicode bidirectional formatting characters in paths, process names and details are
+printed as `?`, so that a file or program name cannot overwrite or fake a line; `--list` and the
+`Now monitoring` line do the same for volume labels and drive models.
 
 ## The self-test
 
@@ -300,15 +328,16 @@ drive.
 
 It:
 
-1. creates the folder `.drivemonitor-selftest-<process id>` at the root of the drive, with a file that it
-   opens before monitoring starts;
+1. creates a new folder at the root of the drive, named `.drivemonitor-selftest-` followed by 16 random
+   hexadecimal digits, with an access list that lets only administrators and SYSTEM change it (FAT and exFAT
+   drives have no access lists), and in it a file that it opens before monitoring starts;
 2. starts a kernel session named `DriveMonitor-SelfTest` and waits 2 seconds for it to settle;
 3. reads and writes the file opened before the start, writes a 1 MiB file with write-through, reads it back
    cached and then unbuffered, renames it, truncates it to 1,000 bytes and deletes it, writes a
    delete-on-close file, lists the folder, and tries to open a file that does not exist;
-4. waits up to 10 seconds for the events, stops the session, deletes the folder, and prints a report: the
-   checks below, every event its own process caused in the test folder, the raw kernel fields, and
-   diagnostics.
+4. waits up to 10 seconds for the events, stops the session, deletes the files it created and then the folder
+   if it is empty, and prints a report: the checks below, every event its own process caused in the test
+   folder, the raw kernel fields, and diagnostics.
 
 | Check | Passes when | Otherwise |
 | --- | --- | --- |
@@ -331,8 +360,16 @@ It:
 | No errors inside trace callbacks | no exception was caught inside a trace callback | FAIL |
 
 The report ends with `RESULT: PASS (0 warning(s))` or `RESULT: FAIL (...)`. The exit code is 1 when a check
-failed or the test could not run, and 0 otherwise; warnings do not fail the test. They point at things that
-depend on the Windows build or on the moment, such as the new name of a renamed file or lost events.
+failed, the test could not run or it was cancelled, and 0 otherwise; warnings do not fail the test. They point
+at things that depend on the Windows build or on the moment, such as the new name of a renamed file or lost
+events.
+
+The self-test does not run when the path of its folder leads through a junction, symbolic link or SUBST
+drive, and it never deletes anything it did not create: anything else it finds in its folder is left in place
+and reported in a `note:` line (see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#the-self-tests-folder)).
+Ctrl+C stops it cleanly: it stops the kernel session, removes the test files, prints
+`Cancelled: the kernel session is stopped and the test files are removed.` and exits with code 1. Closing the
+console window, or a crash, also stops the session and removes the files.
 
 From a clone, `./scripts/Invoke-SelfTest.ps1 -Drive E` builds `drivemon` and runs the self-test in one step.
 When PowerShell is not elevated, Windows asks for permission and the test runs in its own window; the report
@@ -379,8 +416,15 @@ and uploads each report as an artifact (`selftest-report-windows-2022`, `selftes
   reads, shown under the program that made them.
 - **The new name of a renamed file** comes from an undocumented Windows event. When Windows does not send
   it, a rename shows only the old name ("renamed or moved").
+- **The first moment of a new drive is not seen.** With **Monitor new USB drives automatically** on, the app
+  watches a new pendrive from the moment Windows reports the new volume; `drivemon` watches it from its next
+  check for new drive letters, every 200 ms. What happens on the drive before that is not captured.
+- **The activity log has limits.** Each file of a Record log or a `--csv` log holds up to 100 MB, a log keeps
+  its 10 newest files, and it stops when less than 512 MB is free on its drive. The app keeps every earlier
+  recording until you delete it, and `drivemon` does not report a log that stopped during the run.
 - **Bounded memory.** Live activity keeps the newest 20,000 rows by default, and statistics track up to
-  200,000 files; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#data-bounding-caps) lists the limits.
+  200,000 files and 50,000 processes; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#data-bounding-caps) lists
+  the limits.
 
 ## Documentation
 
@@ -400,6 +444,6 @@ and uploads each report as an artifact (`selftest-report-windows-2022`, `selftes
 | `src/DriveMonitor.Core` | Kernel trace session, completion matching, classification, statistics, drive detection, CSV |
 | `src/DriveMonitor.App` | WPF desktop app (`DriveMonitor.exe`) |
 | `src/DriveMonitor.Cli` | `drivemon.exe` console tool and self-test |
-| `tests/DriveMonitor.Tests` | xUnit tests for the engine parts that do not need a kernel session |
+| `tests/DriveMonitor.Tests` | xUnit tests for the engine parts that do not need a kernel session, and for parts of the app and the CLI |
 | `scripts` | `Invoke-SelfTest.ps1` (build and run the self-test) and `Stop-DriveMonitorSessions.ps1` (stop leftover trace sessions) |
 | `.github/workflows` | `ci.yml` (build and test, kernel-trace self-test, the published zip), `codeql.yml` (code scanning), `release.yml` (releases from version tags) |
