@@ -43,32 +43,26 @@ internal static class SelfTest
         }
 
         char drive = options.SelfTestDrive ?? PickDrive();
-        string folder = Path.Combine($"{drive}:\\", $".drivemonitor-selftest-{Environment.ProcessId}");
-        string fileA = Path.Combine(folder, "alpha.bin");
-        string fileB = Path.Combine(folder, "beta.bin");
-        string fileTemp = Path.Combine(folder, "scratch-delete-on-close.tmp");
-        string missing = Path.Combine(folder, "does-not-exist.txt");
-        string preopened = Path.Combine(folder, "opened-before-start.bin");
-        Say($"Drive {drive}:  test folder {folder}");
-
-        // A file whose handle exists before the session starts: its name can only come from the
-        // kernel's file-name rundown.
-        FileStream? earlyHandle;
-        try
+        TestFolder? created = TryCreateFolder(drive, Say);
+        if (created is null)
         {
-            Directory.CreateDirectory(folder);
-            earlyHandle = new FileStream(preopened, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read, 0);
-            earlyHandle.Write(new byte[64 * 1024]);
-            earlyHandle.Flush(flushToDisk: true);
-        }
-        catch (Exception ex)
-        {
-            Say($"FAIL  could not prepare the test folder: {ex.GetType().Name}: {ex.Message}");
             Save(options, report);
             return 1;
         }
 
+        using TestFolder testFolder = created;
+        string folder = testFolder.FullPath;
+        var paths = new TestPaths(
+            folder,
+            testFolder.PathOf("alpha.bin"),
+            testFolder.PathOf("beta.bin"),
+            testFolder.PathOf("scratch-delete-on-close.tmp"),
+            testFolder.PathOf("does-not-exist.txt"),
+            testFolder.PathOf("opened-before-start.bin"));
+        Say($"Drive {drive}:  test folder {folder}");
+
         var raw = new List<string>();
+        var events = new List<FileActivityEvent>();
         int ownPid = Environment.ProcessId;
         using var engine = new MonitorEngine(new MonitorOptions
         {
@@ -83,92 +77,38 @@ internal static class SelfTest
         };
         engine.Drives.SetMonitored(drive, true);
 
-        var startClock = Stopwatch.StartNew();
+        // From here on, every way out stops the kernel session, which outlives the process, and removes the test
+        // files: the normal end, a failure, Ctrl+C, closing the console window and a crash.
+        var interruptions = new Interruptions(engine, testFolder);
+        bool ran;
+        string? leftover;
         try
         {
-            engine.Start();
+            ran = Exercise(engine, testFolder, paths, interruptions, events, Say);
         }
-        catch (MonitorStartException ex)
+        finally
         {
-            Say($"FAIL  could not start the kernel session: {ex.Message}");
-            earlyHandle.Dispose();
-            TryDelete(folder, Say);
+            engine.Stop();
+            engine.DrainEvents(events);
+            leftover = testFolder.Remove();
+            Note(leftover, Say);
+            interruptions.Dispose();
+        }
+
+        if (interruptions.StopRequested)
+        {
+            Say(leftover is null
+                ? "Cancelled: the kernel session is stopped and the test files are removed."
+                : "Cancelled: the kernel session is stopped.");
             Save(options, report);
             return 1;
         }
 
-        Say($"Session started in {startClock.ElapsedMilliseconds} ms; waiting for it to settle...");
-        Thread.Sleep(2000);
-
-        // ---- the operations under test ----
-        var data = new byte[MiB];
-        Random.Shared.NextBytes(data);
-        long cachedRead = 0, uncachedRead = 0;
-        try
+        if (!ran)
         {
-            using (earlyHandle)
-            {
-                earlyHandle.Position = 0;
-                _ = earlyHandle.Read(new byte[64 * 1024]);
-                earlyHandle.Position = 0;
-                earlyHandle.Write(data, 0, 4096);
-                earlyHandle.Flush(flushToDisk: true);
-            }
-
-            using (var fs = new FileStream(fileA, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, FileOptions.WriteThrough))
-            {
-                for (int i = 0; i < 4; i++)
-                    fs.Write(data, i * (MiB / 4), MiB / 4);
-            }
-
-            using (var fs = new FileStream(fileA, FileMode.Open, FileAccess.Read, FileShare.Read, 0))
-            {
-                var buffer = new byte[64 * 1024];
-                int n;
-                while ((n = fs.Read(buffer, 0, buffer.Length)) > 0)
-                    cachedRead += n;
-            }
-
-            uncachedRead = ReadUnbuffered(fileA);
-            File.Move(fileA, fileB);
-            using (var fs = new FileStream(fileB, FileMode.Open, FileAccess.Write))
-                fs.SetLength(1000);
-            File.Delete(fileB);
-            using (var fs = new FileStream(fileTemp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, FileOptions.DeleteOnClose))
-                fs.Write(data, 0, 4096);
-            _ = Directory.GetFiles(folder);
-            try
-            {
-                using FileStream _ = File.OpenRead(missing);
-            }
-            catch (FileNotFoundException)
-            {
-                // Expected: this is the failed-open case.
-            }
+            Save(options, report);
+            return 1;
         }
-        catch (Exception ex)
-        {
-            Say($"FAIL  the test operations themselves failed: {ex.GetType().Name}: {ex.Message}");
-        }
-
-        Say($"Performed: read+write of a file opened before start, 1 MiB write-through write, {cachedRead:N0} B cached read, " +
-            $"{uncachedRead:N0} B unbuffered read, rename, truncate, delete, delete-on-close, listing, failed open.");
-
-        // ---- collect ----
-        var paths = new TestPaths(folder, fileA, fileB, fileTemp, missing, preopened);
-        var events = new List<FileActivityEvent>();
-        var waited = Stopwatch.StartNew();
-        while (waited.Elapsed < TimeSpan.FromSeconds(10))
-        {
-            engine.DrainEvents(events);
-            if (Evaluate(events, ownPid, paths).All(c => c.Verdict == Verdict.Pass))
-                break;
-            Thread.Sleep(250);
-        }
-
-        engine.Stop();
-        engine.DrainEvents(events);
-        TryDelete(folder, Say);
 
         // ---- report ----
         List<Check> checks = Evaluate(events, ownPid, paths);
@@ -213,6 +153,216 @@ internal static class SelfTest
     private sealed record Check(string Name, Verdict Verdict, string Observed);
 
     private sealed record TestPaths(string Folder, string FileA, string FileB, string FileTemp, string Missing, string Preopened);
+
+    /// <summary>
+    /// Starts the kernel session, performs the operations under test and collects their events. The caller
+    /// stops the session and removes the files, whatever happens here.
+    /// </summary>
+    /// <returns>False when the test could not run (the reason has been said) or was cancelled.</returns>
+    private static bool Exercise(
+        MonitorEngine engine,
+        TestFolder testFolder,
+        TestPaths paths,
+        Interruptions interruptions,
+        List<FileActivityEvent> events,
+        Action<string> say)
+    {
+        var (folder, fileA, fileB, fileTemp, missing, preopened) = paths;
+
+        // A file whose handle exists before the session starts: its name can only come from the
+        // kernel's file-name rundown.
+        FileStream? earlyHandle = null;
+        try
+        {
+            try
+            {
+                earlyHandle = testFolder.CreateNew(preopened, FileAccess.ReadWrite, FileShare.Read);
+                earlyHandle.Write(new byte[64 * 1024]);
+                earlyHandle.Flush(flushToDisk: true);
+            }
+            catch (Exception ex)
+            {
+                say($"FAIL  could not prepare the test folder: {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
+
+            if (interruptions.StopRequested)
+                return false;
+
+            var startClock = Stopwatch.StartNew();
+            try
+            {
+                engine.Start();
+            }
+            catch (MonitorStartException ex)
+            {
+                say($"FAIL  could not start the kernel session: {ex.Message}");
+                return false;
+            }
+
+            say($"Session started in {startClock.ElapsedMilliseconds} ms; waiting for it to settle...");
+            if (interruptions.Wait(TimeSpan.FromSeconds(2)))
+                return false;
+
+            // ---- the operations under test ----
+            var data = new byte[MiB];
+            Random.Shared.NextBytes(data);
+            long cachedRead = 0, uncachedRead = 0;
+            try
+            {
+                using (earlyHandle)
+                {
+                    earlyHandle.Position = 0;
+                    _ = earlyHandle.Read(new byte[64 * 1024]);
+                    earlyHandle.Position = 0;
+                    earlyHandle.Write(data, 0, 4096);
+                    earlyHandle.Flush(flushToDisk: true);
+                }
+
+                using (FileStream fs = testFolder.CreateNew(fileA, FileAccess.Write, FileShare.None, FileOptions.WriteThrough))
+                {
+                    for (int i = 0; i < 4; i++)
+                        fs.Write(data, i * (MiB / 4), MiB / 4);
+                }
+
+                using (var fs = new FileStream(fileA, FileMode.Open, FileAccess.Read, FileShare.Read, 0))
+                {
+                    var buffer = new byte[64 * 1024];
+                    int n;
+                    while ((n = fs.Read(buffer, 0, buffer.Length)) > 0)
+                        cachedRead += n;
+                }
+
+                uncachedRead = ReadUnbuffered(fileA);
+                testFolder.Move(fileA, fileB);
+                using (var fs = new FileStream(fileB, FileMode.Open, FileAccess.Write))
+                    fs.SetLength(1000);
+                testFolder.Delete(fileB);
+                using (FileStream fs = testFolder.CreateNew(fileTemp, FileAccess.Write, FileShare.None, FileOptions.DeleteOnClose))
+                    fs.Write(data, 0, 4096);
+                testFolder.Forget(fileTemp); // deleted as its handle closed
+                _ = Directory.GetFiles(folder);
+                try
+                {
+                    using FileStream _ = File.OpenRead(missing);
+                }
+                catch (FileNotFoundException)
+                {
+                    // Expected: this is the failed-open case.
+                }
+            }
+            catch (Exception ex)
+            {
+                say($"FAIL  the test operations themselves failed: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            say($"Performed: read+write of a file opened before start, 1 MiB write-through write, {cachedRead:N0} B cached read, " +
+                $"{uncachedRead:N0} B unbuffered read, rename, truncate, delete, delete-on-close, listing, failed open.");
+
+            // ---- collect ----
+            int ownPid = Environment.ProcessId;
+            var waited = Stopwatch.StartNew();
+            while (waited.Elapsed < TimeSpan.FromSeconds(10))
+            {
+                engine.DrainEvents(events);
+                if (Evaluate(events, ownPid, paths).All(c => c.Verdict == Verdict.Pass))
+                    break;
+                if (interruptions.Wait(TimeSpan.FromMilliseconds(250)))
+                    return false;
+            }
+
+            return true;
+        }
+        finally
+        {
+            // An open file cannot be deleted by the cleanup that follows.
+            earlyHandle?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Ctrl+C (or Ctrl+Break), closing the console window and a crash would each end the process at once,
+    /// leaving the kernel session running (it outlives the process, keeps its buffers and one of the few
+    /// system-wide logger slots, and goes on tracing every file operation) and the test files on the drive.
+    /// These handlers turn them into a request that the main thread answers by cleaning up, and clean up
+    /// themselves when the main thread cannot.
+    /// </summary>
+    private sealed class Interruptions : IDisposable
+    {
+        /// <summary>
+        /// How long closing the console window waits for the main thread to remove the files. Windows ends the
+        /// process about 5 seconds after the window is closed.
+        /// </summary>
+        private static readonly TimeSpan CleanupWait = TimeSpan.FromSeconds(3);
+
+        private readonly MonitorEngine _engine;
+        private readonly TestFolder _folder;
+
+        // Never disposed: a handler that has already started may still use them while the process ends.
+        private readonly CancellationTokenSource _stop = new();
+        private readonly ManualResetEventSlim _cleanedUp = new();
+
+        public Interruptions(MonitorEngine engine, TestFolder folder)
+        {
+            _engine = engine;
+            _folder = folder;
+            Console.CancelKeyPress += OnCancelKeyPress;
+            AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
+            AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
+        }
+
+        public bool StopRequested => _stop.IsCancellationRequested;
+
+        /// <summary>Waits up to <paramref name="timeout"/>; true as soon as a stop is requested.</summary>
+        public bool Wait(TimeSpan timeout) => _stop.Token.WaitHandle.WaitOne(timeout);
+
+        /// <summary>Called once the main thread has stopped the session and removed the files.</summary>
+        public void Dispose()
+        {
+            _cleanedUp.Set();
+            Console.CancelKeyPress -= OnCancelKeyPress;
+            AppDomain.CurrentDomain.ProcessExit -= OnProcessExit;
+            AppDomain.CurrentDomain.UnhandledException -= OnUnhandledException;
+        }
+
+        private void OnCancelKeyPress(object? sender, ConsoleCancelEventArgs e)
+        {
+            // Keep the process alive: the main thread notices within a quarter of a second, or once the file
+            // operation under way is done, and cleans up.
+            e.Cancel = true;
+            _stop.Cancel();
+        }
+
+        private void OnProcessExit(object? sender, EventArgs e)
+        {
+            // Raised when the console window is closed. The session goes first, whatever the main thread is
+            // doing; the files are the main thread's to remove, or this handler's if it does not get there.
+            StopEngine();
+            _stop.Cancel();
+            if (!_cleanedUp.Wait(CleanupWait))
+                _folder.Remove();
+        }
+
+        private void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
+        {
+            // A crash on a worker thread, such as the engine's release timer, runs neither finally blocks nor
+            // ProcessExit handlers.
+            StopEngine();
+            _folder.Remove();
+        }
+
+        private void StopEngine()
+        {
+            try
+            {
+                _engine.Stop();
+            }
+            catch (Exception)
+            {
+                // The process is ending; there is nothing left to try.
+            }
+        }
+    }
 
     private static List<Check> Evaluate(List<FileActivityEvent> events, int ownPid, TestPaths paths)
     {
@@ -315,17 +465,27 @@ internal static class SelfTest
             $"{(io.TargetPath is null ? "" : " target=" + io.TargetPath)}");
     }
 
-    private static void TryDelete(string folder, Action<string> say)
+    /// <summary>
+    /// The drive root is usually writable by every user, and this process is elevated: see
+    /// <see cref="TestFolder"/> for how the folder is kept free of anything another user controls.
+    /// </summary>
+    private static TestFolder? TryCreateFolder(char drive, Action<string> say)
     {
         try
         {
-            if (Directory.Exists(folder))
-                Directory.Delete(folder, recursive: true);
+            return TestFolder.Create($"{drive}:\\");
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
-            say($"note: could not remove {folder}: {ex.Message}");
+            say($"FAIL  could not create the test folder on {drive}: {ex.Message}");
+            return null;
         }
+    }
+
+    private static void Note(string? problem, Action<string> say)
+    {
+        if (problem is not null)
+            say($"note: {problem}");
     }
 
     private static long ReadUnbuffered(string path)

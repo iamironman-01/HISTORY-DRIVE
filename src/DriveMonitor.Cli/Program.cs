@@ -58,7 +58,8 @@ internal static class Program
             string size = d.IsReady ? Formatting.Bytes(d.TotalBytes) : "-";
             string free = d.IsReady ? Formatting.Bytes(d.FreeBytes) : "-";
             string monitored = DriveCatalog.IsMonitoredByDefault(d) ? "yes" : d.IsSystemDrive ? "(system)" : "no";
-            string description = string.Join(" | ", new[] { d.Label, d.Model, d.DevicePath }.Where(s => !string.IsNullOrEmpty(s)));
+            // The label comes from whoever formatted the drive, the model from the device itself.
+            string description = ConsoleText.Clean(string.Join(" | ", new[] { d.Label, d.Model, d.DevicePath }.Where(s => !string.IsNullOrEmpty(s))));
             Console.WriteLine($"{d.Letter + ":",-6}{d.Kind,-11}{d.Bus,-9}{d.FileSystem ?? "-",-7}{size,10}{free,10}  {monitored,-8} {description}");
         }
     }
@@ -66,6 +67,9 @@ internal static class Program
 
 internal sealed class CliOptions
 {
+    /// <summary>The longest --duration, 365 days.</summary>
+    internal const int MaxDurationSeconds = 365 * 24 * 60 * 60;
+
     public bool ShowHelp { get; private set; }
     public bool ShowVersion { get; private set; }
     public bool ListDrives { get; private set; }
@@ -138,10 +142,7 @@ internal sealed class CliOptions
                     o.CsvPath = Value(args, ref i, arg);
                     break;
                 case "-t" or "--duration":
-                    string seconds = Value(args, ref i, arg);
-                    if (!double.TryParse(seconds, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) || s <= 0)
-                        throw new ArgumentException($"Invalid duration '{seconds}'.");
-                    o.Duration = TimeSpan.FromSeconds(s);
+                    o.Duration = ParseDuration(Value(args, ref i, arg));
                     break;
                 case "-q" or "--quiet":
                     o.Quiet = true;
@@ -198,5 +199,21 @@ internal sealed class CliOptions
         if (t.Length != 1 || !char.IsAsciiLetter(t[0]))
             throw new ArgumentException($"'{text}' is not a drive letter.");
         return char.ToUpperInvariant(t[0]);
+    }
+
+    /// <summary>
+    /// Seconds above 0 and at most a year. "Infinity", "1e400" and "NaN" are valid doubles, and values
+    /// far beyond a year overflow TimeSpan, so they must fail here as usage errors, not later as crashes.
+    /// </summary>
+    private static TimeSpan ParseDuration(string text)
+    {
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds)
+            || !double.IsFinite(seconds) || seconds <= 0 || seconds > MaxDurationSeconds)
+        {
+            throw new ArgumentException(
+                $"Invalid duration '{text}': give a number of seconds above 0 and at most {MaxDurationSeconds} (365 days).");
+        }
+
+        return TimeSpan.FromSeconds(seconds);
     }
 }

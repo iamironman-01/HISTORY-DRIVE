@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using DriveMonitor.Core;
@@ -10,6 +11,12 @@ namespace DriveMonitor.Cli;
 /// <summary>Prints file operations on the monitored drives until Ctrl+C or the duration elapses.</summary>
 internal static class LiveMonitor
 {
+    /// <summary>
+    /// How often the drives are enumerated even when no drive letter came or went, as the app does: catches a
+    /// letter that changed hands between two checks.
+    /// </summary>
+    private static readonly TimeSpan FullDriveCheckInterval = TimeSpan.FromSeconds(10);
+
     public static int Run(CliOptions options)
     {
         if (!MonitorEngine.IsElevated)
@@ -24,22 +31,39 @@ internal static class LiveMonitor
             CaptureDirectoryListings = options.ShowListings,
         });
 
-        IReadOnlyList<DriveDescriptor> drives = DriveCatalog.Enumerate(engine.Volumes);
-        List<char> selected = options.Drives
-            ?? drives.Where(d => DriveCatalog.IsMonitoredByDefault(d) || (options.IncludeSystemDrive && d.IsSystemDrive))
-                .Select(d => d.Letter)
-                .ToList();
-        if (options.Drives is null && options.IncludeSystemDrive && !selected.Contains(DriveCatalog.SystemDriveLetter))
-            selected.Add(DriveCatalog.SystemDriveLetter);
-        if (selected.Count == 0)
+        // A crash on a worker thread, such as the engine's release timer, runs neither finally blocks nor
+        // ProcessExit handlers, and the kernel session would outlive the process.
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => StopQuietly(engine);
+
+        // Without --drives the default selection is kept up to date, so that a pendrive plugged in while
+        // drivemon runs is monitored too, as the app does.
+        DriveWatcher? watcher = null;
+        List<char> selected;
+        if (options.Drives is not null)
         {
-            Console.Error.WriteLine("No drives to monitor. Use --drives or --system.");
-            return 1;
+            selected = options.Drives;
+            if (selected.Count == 0)
+            {
+                Console.Error.WriteLine("No drives to monitor. Use --drives or --system.");
+                return 1;
+            }
+        }
+        else
+        {
+            watcher = new DriveWatcher(engine.Drives, options.IncludeSystemDrive, DriveWatcher.PresentLetters, () =>
+            {
+                // First, so that file names on a drive that just arrived map to its letter.
+                engine.Volumes.Refresh();
+                return DriveCatalog.Enumerate(engine.Volumes);
+            });
+            selected = watcher.Check().Select(d => d.Letter).ToList();
+            if (options.IncludeSystemDrive && !selected.Contains(DriveCatalog.SystemDriveLetter))
+                selected.Add(DriveCatalog.SystemDriveLetter);
         }
 
         engine.Drives.SetMonitored(selected);
-        if (options.CsvPath is not null)
-            engine.StartLog(options.CsvPath);
+        if (options.CsvPath is not null && !TryStartLog(engine, options.CsvPath, Console.Error))
+            return 1;
 
         using var stop = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -65,18 +89,35 @@ internal static class LiveMonitor
             return 1;
         }
 
-        Console.WriteLine($"Monitoring {string.Join(", ", selected.Select(d => d + ":"))} - press Ctrl+C to stop.");
+        string letters = string.Join(", ", selected.Select(d => d + ":"));
+        if (watcher is null)
+            Console.WriteLine($"Monitoring {letters} - press Ctrl+C to stop.");
+        else if (selected.Count > 0)
+            Console.WriteLine($"Monitoring {letters} and drives plugged in later - press Ctrl+C to stop.");
+        else
+            Console.WriteLine("Waiting for a drive to be plugged in - press Ctrl+C to stop.");
         if (engine.Log is { } log)
             Console.WriteLine($"Writing every event to {log.FilePath}");
         Console.WriteLine();
 
         var printer = new EventPrinter(options);
         var buffer = new List<FileActivityEvent>(4096);
-        DateTime deadline = options.Duration is { } duration ? DateTime.UtcNow + duration : DateTime.MaxValue;
-        while (!stop.IsCancellationRequested && DateTime.UtcNow < deadline)
+
+        // Elapsed time on a monotonic clock: a wall-clock deadline moves when the clock is adjusted.
+        TimeSpan duration = options.Duration ?? TimeSpan.MaxValue;
+        var running = Stopwatch.StartNew();
+        TimeSpan nextFullDriveCheck = FullDriveCheckInterval;
+        while (!stop.IsCancellationRequested && running.Elapsed < duration)
         {
             stop.Token.WaitHandle.WaitOne(200);
             Flush(engine, printer, buffer);
+            if (watcher is not null)
+            {
+                bool full = running.Elapsed >= nextFullDriveCheck;
+                if (full)
+                    nextFullDriveCheck = running.Elapsed + FullDriveCheckInterval;
+                AddNewDrives(watcher, full);
+            }
         }
 
         engine.Stop();
@@ -84,6 +125,65 @@ internal static class LiveMonitor
         if (!options.NoSummary)
             PrintSummary(engine);
         return 0;
+    }
+
+    /// <summary>
+    /// Starts the CSV log, or says in one line why the file cannot be written (open in another program, a
+    /// folder, an invalid path, no permission) instead of crashing with a stack trace.
+    /// </summary>
+    internal static bool TryStartLog(MonitorEngine engine, string path, TextWriter error)
+    {
+        try
+        {
+            engine.StartLog(path);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            error.WriteLine($"Cannot write the CSV file: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>Stops the session and closes the CSV log while the process dies.</summary>
+    private static void StopQuietly(MonitorEngine engine)
+    {
+        try
+        {
+            engine.Dispose();
+        }
+        catch (Exception)
+        {
+            // The process is ending; there is nothing left to try.
+        }
+    }
+
+    /// <summary>Monitors the drives plugged in since the last check, and says so even with --quiet.</summary>
+    private static void AddNewDrives(DriveWatcher watcher, bool full)
+    {
+        IReadOnlyList<DriveDescriptor> added;
+        try
+        {
+            added = watcher.Check(full);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return; // a drive in the middle of arriving or leaving; the next check tries again
+        }
+
+        foreach (DriveDescriptor drive in added)
+            Console.WriteLine($"Now monitoring {DescribeDrive(drive)}");
+    }
+
+    /// <summary>"F: STICK (SanDisk Ultra)". The label and the model come from the drive, so they are cleaned.</summary>
+    internal static string DescribeDrive(DriveDescriptor drive)
+    {
+        var text = new StringBuilder().Append(drive.Letter).Append(':');
+        if (drive.Label is not null)
+            text.Append(' ').Append(ConsoleText.Clean(drive.Label));
+        if (drive.Model is not null)
+            text.Append(" (").Append(ConsoleText.Clean(drive.Model)).Append(')');
+        return text.ToString();
     }
 
     private static void Flush(MonitorEngine engine, EventPrinter printer, List<FileActivityEvent> buffer)
@@ -114,7 +214,8 @@ internal static class LiveMonitor
             {
                 string lifecycle = f.Lifecycle == FileLifecycle.None ? "" : $" [{f.Lifecycle}]";
                 Console.WriteLine(
-                    $"  R {Formatting.Bytes(f.BytesRead),9}  W {Formatting.Bytes(f.BytesWritten),9}  {f.Path}{lifecycle}  ({f.Processes})");
+                    $"  R {Formatting.Bytes(f.BytesRead),9}  W {Formatting.Bytes(f.BytesWritten),9}  " +
+                    $"{ConsoleText.Clean(f.Path)}{lifecycle}  ({ConsoleText.Clean(f.Processes)})");
             }
         }
 
@@ -125,7 +226,8 @@ internal static class LiveMonitor
         if (engine.CallbackErrors > 0 || engine.Restarts > 0)
         {
             Console.WriteLine(
-                $"Callback errors: {engine.CallbackErrors:N0} (last: {engine.LastCallbackError ?? "-"})  session restarts: {engine.Restarts}");
+                $"Callback errors: {engine.CallbackErrors:N0} (last: {ConsoleText.Clean(engine.LastCallbackError ?? "-")})  " +
+                $"session restarts: {engine.Restarts}");
         }
     }
 }
@@ -156,26 +258,33 @@ internal sealed class EventPrinter(CliOptions options)
         if (!ShouldShow(ev))
             return;
 
-        var line = new StringBuilder(160);
-        line.Append(ev.Timestamp.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)).Append("  ");
-        Console.Write(line.ToString());
+        Console.Write(ev.Timestamp.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + "  ");
 
         ConsoleColor previous = Console.ForegroundColor;
         Console.ForegroundColor = ev.Status == IoStatus.Failed ? ConsoleColor.DarkGray : ColorFor(ev.Operation);
         Console.Write(ev.Operation.ToString().ToUpperInvariant().PadRight(8));
         Console.ForegroundColor = previous;
 
-        line.Clear();
+        Console.WriteLine(Describe(ev));
+    }
+
+    /// <summary>
+    /// The line after the operation column. The path, the process name (from a command line) and the detail
+    /// (listing patterns, rename targets) are chosen by other users, so they are cleaned before printing.
+    /// </summary>
+    internal static string Describe(FileActivityEvent ev)
+    {
+        var line = new StringBuilder(160);
         line.Append(ev.Operation is FileOperation.Read or FileOperation.Write ? Formatting.Bytes(ev.Bytes).PadLeft(9) : new string(' ', 9));
-        line.Append("  ").Append(ev.Path);
+        line.Append("  ").Append(ConsoleText.Clean(ev.Path));
         if (ev.Offset >= 0 && ev.Operation is FileOperation.Read or FileOperation.Write)
             line.Append("  @").Append(ev.Offset.ToString("N0", CultureInfo.CurrentCulture));
-        line.Append("  ").Append(ev.ProcessName).Append(" (").Append(ev.ProcessId).Append(')');
+        line.Append("  ").Append(ConsoleText.Clean(ev.ProcessName)).Append(" (").Append(ev.ProcessId).Append(')');
         if (ev.IsPaging)
             line.Append("  [paging]");
         if (ev.Detail is not null)
-            line.Append("  ").Append(ev.Detail);
-        Console.WriteLine(line.ToString());
+            line.Append("  ").Append(ConsoleText.Clean(ev.Detail));
+        return line.ToString();
     }
 
     private static ConsoleColor ColorFor(FileOperation operation) => operation switch
