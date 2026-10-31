@@ -11,6 +11,12 @@ namespace DriveMonitor.Cli;
 /// <summary>Prints file operations on the monitored drives until Ctrl+C or the duration elapses.</summary>
 internal static class LiveMonitor
 {
+    /// <summary>
+    /// How often the drives are enumerated even when no drive letter came or went, as the app does: catches a
+    /// letter that changed hands between two checks.
+    /// </summary>
+    private static readonly TimeSpan FullDriveCheckInterval = TimeSpan.FromSeconds(10);
+
     public static int Run(CliOptions options)
     {
         if (!MonitorEngine.IsElevated)
@@ -25,17 +31,30 @@ internal static class LiveMonitor
             CaptureDirectoryListings = options.ShowListings,
         });
 
-        IReadOnlyList<DriveDescriptor> drives = DriveCatalog.Enumerate(engine.Volumes);
-        List<char> selected = options.Drives
-            ?? drives.Where(d => DriveCatalog.IsMonitoredByDefault(d) || (options.IncludeSystemDrive && d.IsSystemDrive))
-                .Select(d => d.Letter)
-                .ToList();
-        if (options.Drives is null && options.IncludeSystemDrive && !selected.Contains(DriveCatalog.SystemDriveLetter))
-            selected.Add(DriveCatalog.SystemDriveLetter);
-        if (selected.Count == 0)
+        // Without --drives the default selection is kept up to date, so that a pendrive plugged in while
+        // drivemon runs is monitored too, as the app does.
+        DriveWatcher? watcher = null;
+        List<char> selected;
+        if (options.Drives is not null)
         {
-            Console.Error.WriteLine("No drives to monitor. Use --drives or --system.");
-            return 1;
+            selected = options.Drives;
+            if (selected.Count == 0)
+            {
+                Console.Error.WriteLine("No drives to monitor. Use --drives or --system.");
+                return 1;
+            }
+        }
+        else
+        {
+            watcher = new DriveWatcher(engine.Drives, options.IncludeSystemDrive, DriveWatcher.PresentLetters, () =>
+            {
+                // First, so that file names on a drive that just arrived map to its letter.
+                engine.Volumes.Refresh();
+                return DriveCatalog.Enumerate(engine.Volumes);
+            });
+            selected = watcher.Check().Select(d => d.Letter).ToList();
+            if (options.IncludeSystemDrive && !selected.Contains(DriveCatalog.SystemDriveLetter))
+                selected.Add(DriveCatalog.SystemDriveLetter);
         }
 
         engine.Drives.SetMonitored(selected);
@@ -66,7 +85,13 @@ internal static class LiveMonitor
             return 1;
         }
 
-        Console.WriteLine($"Monitoring {string.Join(", ", selected.Select(d => d + ":"))} - press Ctrl+C to stop.");
+        string letters = string.Join(", ", selected.Select(d => d + ":"));
+        if (watcher is null)
+            Console.WriteLine($"Monitoring {letters} - press Ctrl+C to stop.");
+        else if (selected.Count > 0)
+            Console.WriteLine($"Monitoring {letters} and drives plugged in later - press Ctrl+C to stop.");
+        else
+            Console.WriteLine("Waiting for a drive to be plugged in - press Ctrl+C to stop.");
         if (engine.Log is { } log)
             Console.WriteLine($"Writing every event to {log.FilePath}");
         Console.WriteLine();
@@ -77,10 +102,18 @@ internal static class LiveMonitor
         // Elapsed time on a monotonic clock: a wall-clock deadline moves when the clock is adjusted.
         TimeSpan duration = options.Duration ?? TimeSpan.MaxValue;
         var running = Stopwatch.StartNew();
+        TimeSpan nextFullDriveCheck = FullDriveCheckInterval;
         while (!stop.IsCancellationRequested && running.Elapsed < duration)
         {
             stop.Token.WaitHandle.WaitOne(200);
             Flush(engine, printer, buffer);
+            if (watcher is not null)
+            {
+                bool full = running.Elapsed >= nextFullDriveCheck;
+                if (full)
+                    nextFullDriveCheck = running.Elapsed + FullDriveCheckInterval;
+                AddNewDrives(watcher, full);
+            }
         }
 
         engine.Stop();
@@ -106,6 +139,34 @@ internal static class LiveMonitor
             error.WriteLine($"Cannot write the CSV file: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>Monitors the drives plugged in since the last check, and says so even with --quiet.</summary>
+    private static void AddNewDrives(DriveWatcher watcher, bool full)
+    {
+        IReadOnlyList<DriveDescriptor> added;
+        try
+        {
+            added = watcher.Check(full);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return; // a drive in the middle of arriving or leaving; the next check tries again
+        }
+
+        foreach (DriveDescriptor drive in added)
+            Console.WriteLine($"Now monitoring {DescribeDrive(drive)}");
+    }
+
+    /// <summary>"F: STICK (SanDisk Ultra)". The label and the model come from the drive, so they are cleaned.</summary>
+    internal static string DescribeDrive(DriveDescriptor drive)
+    {
+        var text = new StringBuilder().Append(drive.Letter).Append(':');
+        if (drive.Label is not null)
+            text.Append(' ').Append(ConsoleText.Clean(drive.Label));
+        if (drive.Model is not null)
+            text.Append(" (").Append(ConsoleText.Clean(drive.Model)).Append(')');
+        return text.ToString();
     }
 
     private static void Flush(MonitorEngine engine, EventPrinter printer, List<FileActivityEvent> buffer)
