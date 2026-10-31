@@ -277,9 +277,13 @@ public sealed partial class MainViewModel
         string executable = Environment.ProcessPath!;
         string arguments = SingleInstance.RestartedArgument;
 
-        // Started as "dotnet DriveMonitor.dll": the host needs the app's path.
+        // Started as "dotnet DriveMonitor.dll": the host needs the app's path. Assembly.Location would be empty in
+        // a single-file app, so the path is built from the folder the host loaded the app from.
         if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
-            arguments = $"\"{typeof(MainViewModel).Assembly.Location}\" {arguments}";
+        {
+            string app = Path.Combine(AppContext.BaseDirectory, typeof(MainViewModel).Assembly.GetName().Name + ".dll");
+            arguments = $"\"{app}\" {arguments}";
+        }
 
         try
         {
