@@ -101,3 +101,34 @@ jobs:
           name: selftest-report
           path: selftest-report.txt
           if-no-files-found: ignore
+
+  publish:
+    name: Publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-test, e2e-kernel-trace]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Publish the app and the CLI
+        shell: pwsh
+        run: |
+          $out = 'publish/DriveMonitor'
+          dotnet publish src/DriveMonitor.App/DriveMonitor.App.csproj -c Release -r win-x64 --self-contained false -o $out
+          dotnet publish src/DriveMonitor.Cli/DriveMonitor.Cli.csproj -c Release -r win-x64 --self-contained false -o $out
+          Compress-Archive -Path "$out/*" -DestinationPath DriveMonitor-win-x64.zip
+          $hash = (Get-FileHash DriveMonitor-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  DriveMonitor-win-x64.zip" | Out-File -Encoding ascii DriveMonitor-win-x64.zip.sha256
+          Get-Content DriveMonitor-win-x64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DriveMonitor-win-x64
+          path: |
+            DriveMonitor-win-x64.zip
+            DriveMonitor-win-x64.zip.sha256
