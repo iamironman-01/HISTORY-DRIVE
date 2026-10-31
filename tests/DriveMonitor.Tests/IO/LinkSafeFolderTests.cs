@@ -220,4 +220,23 @@ public sealed class LinkSafeFolderTests
         Assert.Throws<IOException>(() => folder.Rename(temporary, "settings.json"));
         Assert.Equal("keep me", File.ReadAllText(victim));
     }
+
+    [Fact]
+    public void Open_TakesAFolderPathLongerThanMaxPath()
+    {
+        using var temp = new TempDirectory();
+        string path = temp.FullPath;
+        while (path.Length <= 300)
+            path = Path.Combine(path, "a folder with a long name");
+        Directory.CreateDirectory(path);
+
+        using (LinkSafeFolder folder = LinkSafeFolder.Open(path))
+        {
+            Assert.Equal(path, folder.FullPath);
+            using FileStream log = folder.OpenFile("errors.log", FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            log.Write("long"u8);
+        }
+
+        Assert.Equal("long", File.ReadAllText(Path.Combine(path, "errors.log")));
+    }
 }

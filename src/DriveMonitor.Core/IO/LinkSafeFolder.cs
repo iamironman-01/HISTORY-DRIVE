@@ -19,6 +19,11 @@ namespace DriveMonitor.Core.IO;
 /// renamed or deleted and replaced; files are opened relative to that handle, so the folder's path is never
 /// looked up again, and with FILE_OPEN_REPARSE_POINT, so a link is opened as itself and refused; renames
 /// stay in the folder.
+/// <para>
+/// A file system without reparse points may reject FILE_OPEN_REPARSE_POINT as an invalid parameter, as
+/// DeleteFile also allows for. The open is then repeated without it: there is no link to open as itself, and
+/// the handle is still checked for being a folder or having other names.
+/// </para>
 /// </remarks>
 public sealed class LinkSafeFolder : IDisposable
 {
@@ -42,9 +47,14 @@ public sealed class LinkSafeFolder : IDisposable
     private const uint FileOpenReparsePoint = 0x0020_0000;
     private const uint ObjCaseInsensitive = 0x40;
     private const int FileRenameInformationClass = 10;
+    private const int StatusInvalidParameter = unchecked((int)0xC000_000D);
     private const int StatusObjectNameNotFound = unchecked((int)0xC000_0034);
     private const int StatusFileIsADirectory = unchecked((int)0xC000_00BA);
     private const int ErrorAccessDenied = 5;
+    private const int ErrorInvalidParameter = 87;
+
+    /// <summary>The longest path CreateFileW takes without the \\?\ prefix, as .NET's own file APIs count it.</summary>
+    private const int MaxShortPath = 260;
 
     private readonly SafeFileHandle _handle;
 
@@ -63,15 +73,17 @@ public sealed class LinkSafeFolder : IDisposable
     {
         string fullPath = Path.GetFullPath(path);
 
-        // FILE_FLAG_OPEN_REPARSE_POINT opens a link itself rather than what it points to. Without
-        // FILE_SHARE_DELETE nobody can rename or delete the folder while it is open; that takes a handle
-        // with data access (FILE_LIST_DIRECTORY), as one without any is left out of sharing checks.
-        SafeFileHandle handle = NativeMethods.CreateFileW(
-            fullPath, FileListDirectory | FileReadAttributes | Synchronize, NativeMethods.FILE_SHARE_READ | NativeMethods.FILE_SHARE_WRITE,
-            IntPtr.Zero, NativeMethods.OPEN_EXISTING, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
+        // FILE_FLAG_OPEN_REPARSE_POINT opens a link itself rather than what it points to.
+        SafeFileHandle handle = OpenFolder(fullPath, FileFlagOpenReparsePoint, out int error);
+        if (handle.IsInvalid && error == ErrorInvalidParameter)
+        {
+            // A file system without reparse points may reject the flag; see the remarks.
+            handle.Dispose();
+            handle = OpenFolder(fullPath, 0, out error);
+        }
+
         if (handle.IsInvalid)
         {
-            int error = Marshal.GetLastPInvokeError();
             handle.Dispose();
             throw ErrorFromWin32(error, fullPath);
         }
@@ -224,7 +236,41 @@ public sealed class LinkSafeFolder : IDisposable
         return information;
     }
 
-    /// <summary>NtCreateFile of <paramref name="name"/> relative to the folder's handle.</summary>
+    /// <summary>
+    /// Opens the folder to list it. Without FILE_SHARE_DELETE nobody can rename or delete the folder while it is
+    /// open; that takes a handle with data access (FILE_LIST_DIRECTORY), as one without any is left out of
+    /// sharing checks.
+    /// </summary>
+    private static SafeFileHandle OpenFolder(string fullPath, uint flags, out int error)
+    {
+        SafeFileHandle handle = NativeMethods.CreateFileW(
+            ExtendedPath(fullPath), FileListDirectory | FileReadAttributes | Synchronize, NativeMethods.FILE_SHARE_READ | NativeMethods.FILE_SHARE_WRITE,
+            IntPtr.Zero, NativeMethods.OPEN_EXISTING, FileFlagBackupSemantics | flags, IntPtr.Zero);
+        error = handle.IsInvalid ? Marshal.GetLastPInvokeError() : 0;
+        return handle;
+    }
+
+    /// <summary>
+    /// A full path with the \\?\ prefix when it is too long for CreateFileW without one, as .NET's own file APIs
+    /// add it; device paths stay as they are.
+    /// </summary>
+    private static string ExtendedPath(string fullPath)
+    {
+        if (fullPath.Length < MaxShortPath
+            || fullPath.StartsWith(@"\\?\", StringComparison.Ordinal)
+            || fullPath.StartsWith(@"\\.\", StringComparison.Ordinal)
+            || fullPath.StartsWith(@"\??\", StringComparison.Ordinal))
+        {
+            return fullPath;
+        }
+
+        return fullPath.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + fullPath[2..] : @"\\?\" + fullPath;
+    }
+
+    /// <summary>
+    /// NtCreateFile of <paramref name="name"/> relative to the folder's handle; without FILE_OPEN_REPARSE_POINT
+    /// where the file system rejects it (see the remarks).
+    /// </summary>
     private int OpenRelative(string name, uint desiredAccess, FileShare share, uint disposition, uint options, out SafeFileHandle handle)
     {
         IntPtr nameBuffer = Marshal.StringToHGlobalUni(name);
@@ -248,8 +294,17 @@ public sealed class LinkSafeFolder : IDisposable
                 Attributes = ObjCaseInsensitive,
             };
             uint shareAccess = (uint)(share & (FileShare.Read | FileShare.Write | FileShare.Delete));
-            return NtCreateFile(
+            int status = NtCreateFile(
                 out handle, desiredAccess, ref attributes, out _, IntPtr.Zero, 0, shareAccess, disposition, options, IntPtr.Zero, 0);
+            if (status == StatusInvalidParameter && (options & FileOpenReparsePoint) != 0)
+            {
+                handle.Dispose();
+                status = NtCreateFile(
+                    out handle, desiredAccess, ref attributes, out _, IntPtr.Zero, 0, shareAccess, disposition,
+                    options & ~FileOpenReparsePoint, IntPtr.Zero, 0);
+            }
+
+            return status;
         }
         finally
         {
