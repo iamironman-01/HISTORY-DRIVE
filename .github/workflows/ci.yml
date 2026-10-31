@@ -50,3 +50,54 @@ jobs:
           name: test-results
           path: TestResults
           if-no-files-found: ignore
+
+  e2e-kernel-trace:
+    name: Kernel trace self-test
+    needs: build-test
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build the CLI
+        run: dotnet build src/DriveMonitor.Cli/DriveMonitor.Cli.csproj -c Release
+
+      - name: Run the self-test
+        shell: pwsh
+        run: |
+          # GitHub-hosted Windows runners are elevated, so a real kernel trace session can run here.
+          $exe = 'src/DriveMonitor.Cli/bin/Release/net9.0-windows/drivemon.exe'
+          $drive = if (Test-Path 'D:\') { 'D:' } else { 'C:' }
+          Write-Host "Running the kernel-trace self-test on drive $drive"
+          & $exe --self-test $drive --report selftest-report.txt
+          $code = $LASTEXITCODE
+
+          # Surface every check as an annotation so the result is visible without opening the log.
+          function Escape([string] $text) { $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+          if (Test-Path selftest-report.txt) {
+            $passed = @()
+            $inChecks = $false
+            foreach ($line in Get-Content selftest-report.txt) {
+              if ($line -eq 'Checks:') { $inChecks = $true; continue }
+              if ($inChecks -and [string]::IsNullOrWhiteSpace($line)) { $inChecks = $false }
+              $text = $line.Trim()
+              if ($text.StartsWith('FAIL')) { Write-Host "::error title=Self-test::$(Escape $text)" }
+              elseif ($inChecks -and $text.StartsWith('WARN')) { Write-Host "::warning title=Self-test::$(Escape $text)" }
+              elseif ($inChecks) { $passed += $text }
+              elseif ($text.StartsWith('RESULT:')) { Write-Host "::notice title=Self-test result::$(Escape $text)" }
+            }
+            if ($passed.Count -gt 0) { Write-Host "::notice title=Self-test passed checks::$(Escape ($passed -join ' | '))" }
+          }
+          exit $code
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-report
+          path: selftest-report.txt
+          if-no-files-found: ignore
