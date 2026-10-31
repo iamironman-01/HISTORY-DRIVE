@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Principal;
 using DriveMonitor.Core.Aggregation;
 using DriveMonitor.Core.Export;
@@ -6,6 +7,7 @@ using DriveMonitor.Core.Filtering;
 using DriveMonitor.Core.Models;
 using DriveMonitor.Core.Tracing;
 using DriveMonitor.Core.Volumes;
+using Microsoft.Diagnostics.Tracing.Session;
 
 namespace DriveMonitor.Core;
 
@@ -21,6 +23,10 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
 {
     private const int ReleaseIntervalMs = 250;
     private const int MaxRestartsPerMinute = 3;
+    private const int SessionCheckIntervalMs = 200;
+
+    /// <summary>How long Start waits for the session of a DriveMonitor that holds the guard but has none running yet.</summary>
+    private static readonly TimeSpan SessionSettleTime = TimeSpan.FromSeconds(2);
 
     private readonly object _lifecycleLock = new();
     private readonly object _correlatorLock = new();
@@ -71,6 +77,13 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     public bool IsRunning { get; private set; }
 
     public DateTime? StartedAt { get; private set; }
+
+    /// <summary>
+    /// Something the last <see cref="Start"/> worked around and the user may want to know, or null: another
+    /// program holds the guard that keeps two DriveMonitors off one session name although no such session
+    /// is running (a stale guard, or one created to block monitoring).
+    /// </summary>
+    public string? StartWarning { get; private set; }
 
     /// <summary>Events published on monitored drives.</summary>
     public long PublishedEvents => Interlocked.Read(ref _published);
@@ -173,7 +186,8 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
                     "DriveMonitor needs administrator rights to read the Windows kernel file trace. Run it as administrator.");
             }
 
-            AcquireSessionGuard();
+            _sessionGuard = AcquireSessionGuard(Options.SessionName, IsTraceSessionRunning, SessionSettleTime, out string? warning);
+            StartWarning = warning;
             try
             {
                 Volumes.Refresh();
@@ -453,31 +467,78 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         return true;
     }
 
+    internal static string SessionGuardName(string sessionName) =>
+        @"Global\DriveMonitor.Session." + sessionName.Replace('\\', '_');
+
     /// <summary>
     /// TraceEvent replaces a running session that has the same name, which would silently end another
     /// DriveMonitor's monitoring; a machine-wide semaphore per session name prevents that.
     /// </summary>
-    private void AcquireSessionGuard()
+    /// <remarks>
+    /// Any user can create that semaphore first, or hold it, to block monitoring, but only an administrator
+    /// can start the kernel session. So when the guard cannot be taken, the session decides: if one with
+    /// this name is running, another DriveMonitor is monitoring. If none appears within
+    /// <paramref name="settleTime"/> (a DriveMonitor that has just taken the guard, or is restarting its
+    /// session, has none for a moment), the guard is stale or squatted and monitoring goes ahead without it;
+    /// another DriveMonitor then finds this one by its session.
+    /// </remarks>
+    /// <param name="isSessionRunning">Whether a trace session with the name is running; null when that cannot be told.</param>
+    /// <returns>The guard, taken; or null when it was ignored, with <paramref name="warning"/> saying why.</returns>
+    /// <exception cref="MonitorStartException">Another DriveMonitor is monitoring with the session name, or that cannot be ruled out.</exception>
+    internal static Semaphore? AcquireSessionGuard(
+        string sessionName, Func<string, bool?> isSessionRunning, TimeSpan settleTime, out string? warning)
     {
-        string name = @"Global\DriveMonitor.Session." + Options.SessionName.Replace('\\', '_');
-        Semaphore guard;
+        string name = SessionGuardName(sessionName);
+        Semaphore? guard = null;
+        Exception? openError = null;
         try
         {
             guard = new Semaphore(1, 1, name);
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or WaitHandleCannotBeOpenedException or IOException)
         {
-            throw new MonitorStartException($"Could not check whether another DriveMonitor is running: {ex.Message}", ex);
+            // Created by another program, with a DACL that shuts us out or as another kind of object.
+            openError = ex;
         }
 
-        if (!guard.WaitOne(0))
+        warning = null;
+        var waited = Stopwatch.StartNew();
+        while (guard?.WaitOne(0) != true)
         {
-            guard.Dispose();
-            throw new MonitorStartException(
-                $"Another DriveMonitor window or command is already monitoring with the session \"{Options.SessionName}\". Close it first.");
+            bool? running = isSessionRunning(sessionName);
+            if (running != false)
+            {
+                guard?.Dispose();
+                if (running is null && openError is not null)
+                    throw new MonitorStartException($"Could not check whether another DriveMonitor is running: {openError.Message}", openError);
+                throw new MonitorStartException(
+                    $"Another DriveMonitor window or command is already monitoring with the session \"{sessionName}\". Close it first.");
+            }
+
+            if (waited.Elapsed >= settleTime)
+            {
+                guard?.Dispose();
+                warning = $"Another program holds {name}, which keeps two DriveMonitors from sharing the session \"{sessionName}\", " +
+                    "but no such session is running, so monitoring started anyway.";
+                return null;
+            }
+
+            Thread.Sleep(SessionCheckIntervalMs);
         }
 
-        _sessionGuard = guard;
+        return guard;
+    }
+
+    private static bool? IsTraceSessionRunning(string sessionName)
+    {
+        try
+        {
+            return TraceEventSession.GetActiveSessionNames().Contains(sessionName, StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return null; // the caller then assumes another DriveMonitor is running, as before
+        }
     }
 
     private void ReleaseSessionGuard()
