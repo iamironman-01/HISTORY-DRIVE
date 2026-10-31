@@ -35,6 +35,7 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     private CsvActivityLog? _log;
     private volatile string? _logPath;
     private volatile bool _pathOperationsSeen;
+    private bool _disposed;
     private int _queued;
     private int _restarts;
     private long _sequence;
@@ -78,7 +79,11 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     /// <summary>Events discarded because nobody drained the queue fast enough.</summary>
     public long DroppedEvents => Interlocked.Read(ref _dropped);
 
-    /// <summary>I/O whose file name was unknown (typically files opened before monitoring started).</summary>
+    /// <summary>
+    /// I/O whose file name was unknown (typically files opened before monitoring started), counted for
+    /// the whole system rather than only the monitored drives: without a name the drive is unknown, so
+    /// the drive filter cannot apply.
+    /// </summary>
     public long UnnamedEvents => Interlocked.Read(ref _unnamed);
 
     /// <summary>Events the kernel dropped because the consumer fell behind.</summary>
@@ -153,11 +158,14 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         }
     }
 
+    /// <exception cref="ObjectDisposedException">The engine has been disposed.</exception>
     /// <exception cref="MonitorStartException">Not elevated, already monitoring elsewhere, or the kernel session could not be created.</exception>
     public void Start()
     {
         lock (_lifecycleLock)
         {
+            // Checked under the lock Dispose sets it under: a session started after Dispose would never be stopped.
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (IsRunning)
                 return;
             if (!IsElevated)
@@ -246,8 +254,14 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
             Interlocked.Decrement(ref _queued);
     }
 
+    /// <summary>Stops monitoring and the log for good; <see cref="Start"/> throws afterwards. Safe to call more than once.</summary>
     public void Dispose()
     {
+        // A Start that took the lock first is stopped below; any later one throws. Repeated calls still
+        // go through Stop, so one racing an earlier call returns only once the kernel session has stopped.
+        lock (_lifecycleLock)
+            _disposed = true;
+
         Stop();
         StopLog();
     }
@@ -383,8 +397,9 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         Exception reported = error;
         lock (_lifecycleLock)
         {
-            if (!IsRunning || !ReferenceEquals(_sources.Current, faulted))
-                return; // already stopped or replaced
+            // Once disposed no new session may start; the Stop inside Dispose shuts this one down.
+            if (_disposed || !IsRunning || !ReferenceEquals(_sources.Current, faulted))
+                return; // disposing, already stopped, or replaced
 
             RetireSource(faulted);
             ReleaseDue(flushAll: true);

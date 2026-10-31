@@ -532,7 +532,7 @@
                     <TextBlock Style="{StaticResource StatusItem}" Text="{Binding DroppedText}"
                                ToolTip="Events DriveMonitor discarded because the display could not keep up with them." />
                     <TextBlock Style="{StaticResource StatusItem}" Text="{Binding UnnamedText}"
-                               ToolTip="I/O on files that were already open before monitoring started; Windows did not report their names." />
+                               ToolTip="I/O on files that were already open before monitoring started; Windows did not report their names. Counted for all drives, not only the monitored ones, because without a name the drive is unknown." />
                     <TextBlock Style="{StaticResource StatusItem}" Text="{Binding TrackedFilesText}"
                                ToolTip="Files with totals in the Files tab" />
                 </StackPanel>

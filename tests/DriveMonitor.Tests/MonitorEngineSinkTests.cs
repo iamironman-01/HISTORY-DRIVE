@@ -45,6 +45,41 @@ public sealed class MonitorEngineSinkTests
     }
 
     [Fact]
+    public void Start_AfterDispose_ThrowsObjectDisposedException()
+    {
+        var engine = new MonitorEngine();
+        int stateChanges = 0;
+        engine.StateChanged += (_, _) => stateChanges++;
+
+        engine.Dispose();
+
+        // Checked before the elevation check, so even as administrator no kernel session is created.
+        Assert.Throws<ObjectDisposedException>(engine.Start);
+        Assert.False(engine.IsRunning);
+        Assert.Null(engine.StartedAt);
+        Assert.Equal(0, stateChanges);
+    }
+
+    [Fact]
+    public void Dispose_CalledTwice_IsHarmless()
+    {
+        using var temp = new TempDirectory();
+        var engine = new MonitorEngine();
+        int stateChanges = 0;
+        engine.StateChanged += (_, _) => stateChanges++;
+        engine.StartLog(temp.PathOf("activity.csv"));
+
+        engine.Dispose();
+        engine.Dispose();
+        engine.Stop();
+
+        Assert.Null(engine.Log);
+        Assert.False(engine.IsRunning);
+        Assert.Equal(0, stateChanges);
+        Assert.Throws<ObjectDisposedException>(engine.Start); // the repeated calls did not undo the first
+    }
+
+    [Fact]
     public void TryAccept_PathOnAMonitoredDrive_ReturnsTheDrive()
     {
         using MonitorEngine engine = CreateEngine();
@@ -65,6 +100,19 @@ public sealed class MonitorEngineSinkTests
         IFileIoSink sink = engine;
 
         Assert.False(Accept(sink, path, OtherProcessId, out _));
+        Assert.Equal(1L, engine.UnnamedEvents);
+    }
+
+    [Fact]
+    public void TryAccept_UnnamedEvents_AreCountedEvenWithNoDriveMonitored()
+    {
+        using var engine = new MonitorEngine();
+        IFileIoSink sink = engine;
+
+        Assert.False(Accept(sink, "", OtherProcessId, out _));
+        Assert.False(Accept(sink, @"F:\named.txt", OtherProcessId, out _));
+
+        // Without a name the drive is unknown, so the count cannot be limited to the monitored drives.
         Assert.Equal(1L, engine.UnnamedEvents);
     }
 
