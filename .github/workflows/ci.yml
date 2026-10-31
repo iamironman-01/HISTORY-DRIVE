@@ -58,9 +58,14 @@ jobs:
           if-no-files-found: ignore
 
   e2e-kernel-trace:
-    name: Kernel trace self-test
+    name: Kernel trace self-test (${{ matrix.os }})
     needs: build-test
-    runs-on: windows-latest
+    # Kernel ETW behaviour can differ between Windows releases, so the live test runs on each server image.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -86,7 +91,7 @@ jobs:
           function Escape([string] $text) { $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
           if (Test-Path selftest-report.txt) {
             $passed = @()
-            $rows = @("### Kernel trace self-test on $drive", '', '| Result | Check | Observed |', '| --- | --- | --- |')
+            $rows = @("### Kernel trace self-test on $drive ($env:ImageOS)", '', '| Result | Check | Observed |', '| --- | --- | --- |')
             $result = ''
             $inChecks = $false
             foreach ($line in Get-Content selftest-report.txt) {
@@ -127,7 +132,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: selftest-report
+          name: selftest-report-${{ matrix.os }}
           path: selftest-report.txt
           if-no-files-found: ignore
 
