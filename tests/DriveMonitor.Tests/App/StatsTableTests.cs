@@ -51,6 +51,44 @@ public sealed class StatsTableTests
         Assert.Equal(new[] { "a", "b" }, Visible(table));
     }
 
+    [Fact]
+    public void Apply_ShowsARowThatStartsMatchingTheSearch()
+    {
+        StatsTable<string, (string Name, long Size), Row> table = NewTable(row => ((Row)row).Size >= 1_000);
+        table.ApplySearch(hasSearch: true);
+        table.Apply([("a", 500), ("b", 2_000)]);
+        Assert.Equal(new[] { "b" }, Visible(table));
+
+        table.Apply([("a", 5_000)]);
+
+        Assert.Equal(new[] { "a", "b" }, Visible(table));
+    }
+
+    [Fact]
+    public void Apply_HidesARowThatNoLongerMatchesTheSearch()
+    {
+        StatsTable<string, (string Name, long Size), Row> table = NewTable(row => ((Row)row).Size >= 1_000);
+        table.ApplySearch(hasSearch: true);
+        table.Apply([("a", 5_000), ("b", 2_000)]);
+
+        table.Apply([("b", 10), ("c", 3_000)]);
+
+        Assert.Equal(new[] { "a", "c" }, Visible(table));
+    }
+
+    [Fact]
+    public void Apply_WithoutASearch_ShowsEveryRow()
+    {
+        StatsTable<string, (string Name, long Size), Row> table = NewTable(row => ((Row)row).Size >= 1_000);
+        table.Apply([("a", 5_000), ("b", 2_000)]);
+        List<NotifyCollectionChangedAction> changes = Record(table);
+
+        table.Apply([("b", 10)]); // the filter is only installed while a search is active
+
+        Assert.Empty(changes);
+        Assert.Equal(new[] { "a", "b" }, Visible(table));
+    }
+
     internal sealed class Row(string name, long size)
     {
         public string Name { get; } = name;

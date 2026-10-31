@@ -51,13 +51,20 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
 
     public void Apply(IReadOnlyList<TSnapshot> changed)
     {
+        // The view runs its filter only when a row is added or the view is refreshed, but a search can match
+        // values that change in place: a file read by one more process, or renamed.
+        Predicate<object>? filter = View.Filter;
+        bool matchChanged = false;
         foreach (TSnapshot snapshot in changed)
         {
             TKey key = _keyOf(snapshot);
             if (_rows.TryGetValue(key, out TRow? row))
             {
+                bool matched = filter?.Invoke(row) ?? true;
                 _update(row, snapshot);
                 _resort.RowsChanged();
+                if (filter is not null && filter(row) != matched)
+                    matchChanged = true;
             }
             else
             {
@@ -71,6 +78,14 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
         {
             Items.AddRange(_added);
             _added.Clear();
+        }
+
+        // Rare, since a search matches paths and process names rather than totals, so refreshing the whole view
+        // then costs little overall.
+        if (matchChanged)
+        {
+            View.Refresh();
+            _resort.Refreshed();
         }
     }
 
