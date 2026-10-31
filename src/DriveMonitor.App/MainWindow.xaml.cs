@@ -38,7 +38,10 @@ public partial class MainWindow : Window
         // Reset (a refresh with more than 200 new rows, a search, a re-sort) then collapses a multi-row selection
         // to that one row. Nothing here uses currency, so each grid keeps the rows the user selected instead.
         foreach (DataGrid grid in new[] { ActivityGrid, FilesGrid, ProcessesGrid })
+        {
             grid.IsSynchronizedWithCurrentItem = false;
+            grid.SelectionChanged += OnGridSelectionChanged;
+        }
 
         viewModel.CloseRequested += OnCloseRequested;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -269,6 +272,25 @@ public partial class MainWindow : Window
             other.SortDirection = null;
         column.SortDirection = direction;
         view.CustomSort = comparer;
+    }
+
+    /// <summary>
+    /// Tells the table how many rows its grid has selected: with thousands selected, adding or removing rows one
+    /// notification at a time costs that many times more, so the table switches to a Reset sooner.
+    /// </summary>
+    private void OnGridSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Selection changes of controls inside the grid bubble up through it too.
+        if (!ReferenceEquals(e.OriginalSource, sender) || sender is not DataGrid grid)
+            return;
+
+        int selected = grid.SelectedItems.Count;
+        if (ReferenceEquals(grid, ActivityGrid))
+            _viewModel.Activity.SelectedCount = selected;
+        else if (ReferenceEquals(grid, FilesGrid))
+            _viewModel.Files.SelectedCount = selected;
+        else
+            _viewModel.Processes.SelectedCount = selected;
     }
 
     // Row mouse handling: right-click selects the row under the mouse; double-click opens its folder.

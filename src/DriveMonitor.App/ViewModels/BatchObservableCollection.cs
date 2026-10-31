@@ -11,16 +11,28 @@ namespace DriveMonitor.App.ViewModels;
 /// WPF collection views reject multi-item change notifications, so a batch is reported either
 /// item by item (keeps the grid's containers, selection and scroll position) or, above
 /// <see cref="ResetThreshold"/> items, as a single Reset (one rebuild instead of thousands of
-/// notifications during a burst).
+/// notifications during a burst). A large <see cref="SelectedCount"/> moves smaller batches to a
+/// Reset as well.
 /// </remarks>
 public sealed class BatchObservableCollection<T> : ObservableCollection<T>
 {
+    // Below this many selected rows the selection adds little to the cost of a per-item notification.
+    private const int CostlySelection = 500;
+
     private static readonly PropertyChangedEventArgs CountChanged = new(nameof(Count));
     private static readonly PropertyChangedEventArgs IndexerChanged = new("Item[]");
     private static readonly NotifyCollectionChangedEventArgs ResetArgs = new(NotifyCollectionChangedAction.Reset);
 
     /// <summary>Batches with more changed items than this are reported as one Reset.</summary>
     public int ResetThreshold { get; init; } = 200;
+
+    /// <summary>
+    /// Rows selected in the grid that shows this collection. The grid goes through its whole selection for
+    /// every per-item notification, so reported item by item a batch costs changed items × selected rows,
+    /// against about one pass over the list for a Reset, which keeps the selection. Once that product
+    /// exceeds the list's length, the batch is reported as a Reset.
+    /// </summary>
+    public int SelectedCount { get; set; }
 
     /// <summary>Appends <paramref name="items"/>.</summary>
     public void AddRange(IReadOnlyList<T> items) => RemoveFirstAndAddRange(0, items);
@@ -36,7 +48,7 @@ public sealed class BatchObservableCollection<T> : ObservableCollection<T>
         if (removeCount == 0 && addCount == 0)
             return;
 
-        if (removeCount + addCount <= ResetThreshold)
+        if (!ReportAsReset(removeCount + addCount))
         {
             // Always remove index 0: the oldest items are at the start.
             for (int i = 0; i < removeCount; i++)
@@ -64,6 +76,9 @@ public sealed class BatchObservableCollection<T> : ObservableCollection<T>
         list.AddRange(items);
         RaiseReset();
     }
+
+    private bool ReportAsReset(int changes) =>
+        changes > ResetThreshold || (SelectedCount >= CostlySelection && (long)changes * SelectedCount > Count);
 
     private void RaiseReset()
     {

@@ -40,6 +40,13 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
     /// <summary>The filtered (and possibly sorted) rows the grid shows.</summary>
     public ListCollectionView View { get; }
 
+    /// <summary>Rows selected in the grid; see <see cref="BatchObservableCollection{T}.SelectedCount"/>.</summary>
+    public int SelectedCount
+    {
+        get => Items.SelectedCount;
+        set => Items.SelectedCount = value;
+    }
+
     public void Apply(IReadOnlyList<TSnapshot> changed)
     {
         foreach (TSnapshot snapshot in changed)

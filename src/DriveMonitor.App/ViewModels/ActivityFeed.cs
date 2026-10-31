@@ -43,6 +43,13 @@ public sealed class ActivityFeed
     /// <summary>Rows in the list, visible or not.</summary>
     public int TotalRows => _rows.Count;
 
+    /// <summary>Rows selected in the grid; see <see cref="BatchObservableCollection{T}.SelectedCount"/>.</summary>
+    public int SelectedCount
+    {
+        get => _rows.SelectedCount;
+        set => _rows.SelectedCount = value;
+    }
+
     public bool IsPaused { get; private set; }
 
     /// <summary>Events waiting to be shown when the view resumes.</summary>
