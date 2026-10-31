@@ -12,6 +12,18 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      TraceEvent's props add its native DLLs (KernelTraceControl.dll, msdia140.dll) as None items in x86\,
+      amd64\ and arm64\ folders, keeping only the matching folder when a runtime is set. A publish profile
+      sets the runtime for the app or the CLI only, so this library is still built without one and would
+      add all three folders to their publish output. The app and the CLI import the same props themselves,
+      so leave publishing these DLLs to them.
+    -->
+    <None Update="@(None->WithMetadataValue('Filename', 'KernelTraceControl'))" CopyToPublishDirectory="Never" />
+    <None Update="@(None->WithMetadataValue('Filename', 'msdia140'))" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="DriveMonitor.Tests" />
     <!-- The CLI self-test records raw kernel fields through MonitorEngine.RawOperationObserver. -->
     <InternalsVisibleTo Include="drivemon" />
