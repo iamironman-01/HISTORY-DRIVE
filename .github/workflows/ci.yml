@@ -106,6 +106,23 @@ jobs:
           }
           exit $code
 
+      - name: Clean up a session left by a killed process
+        shell: pwsh
+        run: |
+          # A killed drivemon cannot stop its kernel session; the cleanup script must find and stop it.
+          $exe = 'src/DriveMonitor.Cli/bin/Release/net9.0-windows/drivemon.exe'
+          $process = Start-Process -FilePath $exe -ArgumentList '--quiet', '--no-summary' -PassThru
+          Start-Sleep -Seconds 5
+          Stop-Process -Id $process.Id -Force
+          if (-not (logman query -ets | Select-String 'DriveMonitor-CLI')) {
+            throw 'Expected the killed drivemon to leave the DriveMonitor-CLI session running.'
+          }
+          ./scripts/Stop-DriveMonitorSessions.ps1
+          if (logman query -ets | Select-String 'DriveMonitor-CLI') {
+            throw 'DriveMonitor-CLI is still running after the cleanup script.'
+          }
+          Write-Host 'The leftover session was found and stopped.'
+
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v7
