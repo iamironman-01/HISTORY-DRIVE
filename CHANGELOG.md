@@ -24,8 +24,8 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
     DriveMonitors from sharing a session.
   - Limits on the tables and queues that grow with file activity.
 - **CLI** (`drivemon`): live monitoring with filters (`--opens`, `--listings`, `--other`, `--paging`,
-  `--failed`), `--csv`, `--duration`, `--quiet` and a summary on exit; `--list`; and `--self-test`, an
-  end-to-end check of 17 points on a real kernel trace, with `--report`.
+  `--failed`), `--csv`, `--duration`, `--quiet` and a summary on exit; `--list`; `--version`; and
+  `--self-test`, an end-to-end check of 17 points on a real kernel trace, with `--report`.
 - **App** (`DriveMonitor.exe`, WPF): a drive panel that picks up new USB drives automatically; Live
   activity, Files and Processes tabs; filters, search, grouping of repeated operations, pause and sorting;
   Record log and CSV export; banners and diagnostics in the status bar; one window per Windows session,
@@ -33,6 +33,11 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
 - **Scripts**: `scripts/Invoke-SelfTest.ps1` builds `drivemon` and runs the self-test in one step, asking
   for administrator rights when needed; `scripts/Stop-DriveMonitorSessions.ps1` stops kernel trace
   sessions left behind by a DriveMonitor that was killed.
+- **Packaging**: package versions managed centrally in `Directory.Packages.props`; locked restores
+  (`packages.lock.json`, enforced in CI); release metadata and a product version that carries the commit it
+  was built from; publish profiles for a framework-dependent win-x64 build and self-contained, single-file
+  win-x64 and win-arm64 builds, which keep TraceEvent's native DLLs beside the executable where TraceEvent
+  loads them.
 - **Tests**: unit tests for the engine, and tests that call the real Windows APIs it depends on (drive
   enumeration, the storage query, device and process-image lookups).
 - **CI**: a GitHub Actions workflow that builds and tests every push and every pull request to `main`, with
