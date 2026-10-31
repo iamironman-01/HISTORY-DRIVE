@@ -7,3 +7,6 @@ TestResults/
 artifacts/
 publish/
 *.etl
+
+# Local git worktrees created by Claude Code agents
+.claude/worktrees/

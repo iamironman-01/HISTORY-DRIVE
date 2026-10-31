@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  build-test:
+    name: Build and test
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore DriveMonitor.sln
+
+      - name: Build
+        run: dotnet build DriveMonitor.sln -c Release --no-restore -warnaserror
+
+      - name: Test
+        run: >-
+          dotnet test DriveMonitor.sln -c Release --no-build
+          --logger "trx;LogFileName=results.trx"
+          --results-directory TestResults
+          --collect "XPlat Code Coverage"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
+          if-no-files-found: ignore
+
+  e2e-kernel-trace:
+    name: Kernel trace self-test
+    needs: build-test
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build the CLI
+        run: dotnet build src/DriveMonitor.Cli/DriveMonitor.Cli.csproj -c Release
+
+      - name: Run the self-test
+        shell: pwsh
+        run: |
+          # GitHub-hosted Windows runners are elevated, so a real kernel trace session can run here.
+          $exe = 'src/DriveMonitor.Cli/bin/Release/net9.0-windows/drivemon.exe'
+          $drive = if (Test-Path 'D:\') { 'D:' } else { 'C:' }
+          Write-Host "Running the kernel-trace self-test on drive $drive"
+          & $exe --self-test $drive --report selftest-report.txt
+          $code = $LASTEXITCODE
+
+          # Surface every check as an annotation so the result is visible without opening the log.
+          function Escape([string] $text) { $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+          if (Test-Path selftest-report.txt) {
+            $passed = @()
+            $inChecks = $false
+            foreach ($line in Get-Content selftest-report.txt) {
+              if ($line -eq 'Checks:') { $inChecks = $true; continue }
+              if ($inChecks -and [string]::IsNullOrWhiteSpace($line)) { $inChecks = $false }
+              $text = $line.Trim()
+              if ($text.StartsWith('FAIL')) { Write-Host "::error title=Self-test::$(Escape $text)" }
+              elseif ($inChecks -and $text.StartsWith('WARN')) { Write-Host "::warning title=Self-test::$(Escape $text)" }
+              elseif ($inChecks) { $passed += $text }
+              elseif ($text.StartsWith('RESULT:')) { Write-Host "::notice title=Self-test result::$(Escape $text)" }
+            }
+            if ($passed.Count -gt 0) { Write-Host "::notice title=Self-test passed checks::$(Escape ($passed -join ' | '))" }
+          }
+          exit $code
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-report
+          path: selftest-report.txt
+          if-no-files-found: ignore
+
+  publish:
+    name: Publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-test, e2e-kernel-trace]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Publish the app and the CLI
+        shell: pwsh
+        run: |
+          $out = 'publish/DriveMonitor'
+          dotnet publish src/DriveMonitor.App/DriveMonitor.App.csproj -c Release -r win-x64 --self-contained false -o $out
+          dotnet publish src/DriveMonitor.Cli/DriveMonitor.Cli.csproj -c Release -r win-x64 --self-contained false -o $out
+          Compress-Archive -Path "$out/*" -DestinationPath DriveMonitor-win-x64.zip
+          $hash = (Get-FileHash DriveMonitor-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  DriveMonitor-win-x64.zip" | Out-File -Encoding ascii DriveMonitor-win-x64.zip.sha256
+          Get-Content DriveMonitor-win-x64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DriveMonitor-win-x64
+          path: |
+            DriveMonitor-win-x64.zip
+            DriveMonitor-win-x64.zip.sha256
