@@ -87,13 +87,15 @@ public sealed class FileIoClassifierTests
     // ---- read / write ----
 
     [Theory]
-    [InlineData(4096UL, 4096, 4096L)] // full transfer
-    [InlineData(100UL, 4096, 100L)] // short read at the end of the file
-    [InlineData(0UL, 4096, 0L)] // read at the end of the file
-    [InlineData(8192UL, 4096, 4096L)] // never more than requested
-    [InlineData(512UL, 0, 512L)] // no request size known: trust the completion
-    [InlineData(5_000_000_000UL, 0, 2_147_483_647L)] // capped at int.MaxValue
-    public void ReadWrite_Success_ReportsTheTransferredBytes(ulong info, int ioSize, long expected)
+    [InlineData(4096UL, 4096L, 4096L)] // full transfer
+    [InlineData(100UL, 4096L, 100L)] // short read at the end of the file
+    [InlineData(0UL, 4096L, 0L)] // read at the end of the file
+    [InlineData(8192UL, 4096L, 4096L)] // never more than requested
+    [InlineData(512UL, 0L, 512L)] // no request size known: trust the completion
+    [InlineData(5_000_000_000UL, 0L, 4_294_967_295L)] // ... up to the most one request can ask for (a ULONG)
+    [InlineData(3_221_225_472UL, 3_221_225_472L, 3_221_225_472L)] // a 3 GiB request is not clamped to 2 GiB
+    [InlineData(5_000_000_000UL, 4_294_967_295L, 4_294_967_295L)] // the largest request
+    public void ReadWrite_Success_ReportsTheTransferredBytes(ulong info, long ioSize, long expected)
     {
         foreach (RawFileOp op in new[] { RawFileOp.Read, RawFileOp.Write })
         {
@@ -126,18 +128,43 @@ public sealed class FileIoClassifierTests
     }
 
     [Theory]
-    [InlineData(65536, 65536L)]
-    [InlineData(0, 0L)]
-    [InlineData(-1, 0L)]
-    public void ReadWrite_NoCompletion_ReportsTheRequestedSize(int ioSize, long expected)
+    [InlineData(65536L)]
+    [InlineData(0L)]
+    [InlineData(3_221_225_472L)] // 3 GiB
+    [InlineData(4_294_967_295L)] // the largest request (a ULONG)
+    public void ReadWrite_NoCompletion_ReportsTheRequestedSize(long ioSize)
     {
-        PendingIo io = Io(RawFileOp.Read);
-        io.IoSize = ioSize;
+        foreach (RawFileOp op in new[] { RawFileOp.Read, RawFileOp.Write })
+        {
+            PendingIo io = Io(op);
+            io.IoSize = ioSize;
 
-        FileActivityEvent ev = Classify(io);
+            FileActivityEvent ev = Classify(io);
 
-        Assert.Equal(IoStatus.Unknown, ev.Status);
-        Assert.Equal(expected, ev.Bytes);
+            Assert.Equal(IoStatus.Unknown, ev.Status);
+            Assert.Equal(ioSize, ev.Bytes);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, 0L)]
+    [InlineData(65536, 65536L)]
+    [InlineData(int.MaxValue, 2_147_483_647L)]
+    [InlineData(int.MinValue, 2_147_483_648L)] // 2 GiB, which TraceEvent returns as int.MinValue
+    [InlineData(-1_073_741_824, 3_221_225_472L)] // 3 GiB
+    [InlineData(-1, 4_294_967_295L)] // the largest request
+    public void RequestSize_ReadsTheTracedIntAsTheKernelsUnsignedLength(int traced, long expected)
+    {
+        Assert.Equal(expected, PendingIo.RequestSize(traced));
+    }
+
+    [Fact]
+    public void ReadWrite_RequestOf2GiBOrMore_KeepsItsSizeFromTraceToEvent()
+    {
+        PendingIo io = Completed(Io(RawFileOp.Write), status: 0, info: 3_221_225_472);
+        io.IoSize = PendingIo.RequestSize(-1_073_741_824); // a 3 GiB WriteFile, as TraceEvent returns it
+
+        Assert.Equal(3_221_225_472L, Classify(io).Bytes);
     }
 
     [Theory]
@@ -184,6 +211,37 @@ public sealed class FileIoClassifierTests
         Assert.Equal(0L, ev.Bytes);
     }
 
+    [Fact]
+    public void EndOfFile_OnARead_IsASuccessfulZeroByteRead()
+    {
+        // The read that ends a read-until-empty loop: it starts at the end of the file and moves nothing.
+        PendingIo io = Completed(Io(RawFileOp.Read), FileIoClassifier.StatusEndOfFile, info: 0);
+        io.IoSize = 4096;
+        io.Offset = 10_000;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(FileOperation.Read, ev.Operation);
+        Assert.Equal(IoStatus.Success, ev.Status);
+        Assert.Equal(FileIoClassifier.StatusEndOfFile, ev.NtStatus);
+        Assert.Equal(0L, ev.Bytes);
+        Assert.Equal(10_000L, ev.Offset);
+        Assert.Null(ev.Detail);
+    }
+
+    [Fact]
+    public void EndOfFile_OnAWrite_IsAFailure()
+    {
+        PendingIo io = Completed(Io(RawFileOp.Write), FileIoClassifier.StatusEndOfFile, info: 0);
+        io.IoSize = 4096;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(IoStatus.Failed, ev.Status);
+        Assert.Equal("end of file", ev.Detail);
+        Assert.Equal(0L, ev.Bytes);
+    }
+
     // ---- create ----
 
     [Theory]
@@ -197,6 +255,7 @@ public sealed class FileIoClassifierTests
     {
         PendingIo io = Completed(Io(RawFileOp.Create), status: 0, info);
         io.CreateDisposition = FileIoClassifier.FileOpenIf; // the outcome, not the request, decides
+        io.CreateOptions = FileIoClassifier.FileNonDirectoryFile; // as CreateFileW asks for a file
         io.IoSize = 4096;
         io.Offset = 123;
 
@@ -275,6 +334,45 @@ public sealed class FileIoClassifierTests
         Assert.True(ev.IsDirectory);
     }
 
+    [Theory]
+    [InlineData(FileIoClassifier.FileNonDirectoryFile, FileEventFlags.None)] // CreateFileW without backup semantics
+    [InlineData(FileIoClassifier.FileDirectoryFile, FileEventFlags.Directory)]
+    [InlineData(0, FileEventFlags.MaybeDirectory)] // backup semantics, as folder watchers and backup tools open
+    [InlineData(0x4000, FileEventFlags.MaybeDirectory)] // FILE_OPEN_FOR_BACKUP_INTENT alone
+    public void Create_OpenTypeOptions_SayWhetherTheTargetMayBeAFolder(int createOptions, FileEventFlags expected)
+    {
+        foreach (bool completed in new[] { true, false })
+        {
+            PendingIo io = Io(RawFileOp.Create);
+            if (completed)
+                io = Completed(io, status: 0, FileIoClassifier.FileOpened);
+            io.CreateDisposition = FileIoClassifier.FileOpen;
+            io.CreateOptions = createOptions;
+
+            FileActivityEvent ev = Classify(io);
+
+            Assert.Equal(FileOperation.Open, ev.Operation);
+            Assert.Equal(expected, ev.Flags);
+        }
+    }
+
+    [Theory]
+    [InlineData(FileIoClassifier.FileCreated)]
+    [InlineData(FileIoClassifier.FileOverwritten)]
+    [InlineData(FileIoClassifier.FileSuperseded)]
+    public void Create_WithoutAnyTypeOption_MakesAFile(ulong info)
+    {
+        // Only FILE_DIRECTORY_FILE creates a folder, so a create that accepted either type made a file.
+        PendingIo io = Completed(Io(RawFileOp.Create), status: 0, info);
+        io.CreateDisposition = FileIoClassifier.FileOverwriteIf;
+        io.CreateOptions = 0;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(FileOperation.Create, ev.Operation);
+        Assert.Equal(FileEventFlags.None, ev.Flags);
+    }
+
     [Fact]
     public void Create_DirectoryFlag_IsKeptWhenTheCreateFails()
     {
@@ -290,7 +388,7 @@ public sealed class FileIoClassifierTests
     public void Create_DeleteOnClose_SetsTheFlagAndAddsToTheDetail(ulong info, string detail)
     {
         PendingIo io = Completed(Io(RawFileOp.Create), status: 0, info);
-        io.CreateOptions = FileIoClassifier.FileDeleteOnClose;
+        io.CreateOptions = FileIoClassifier.FileNonDirectoryFile | FileIoClassifier.FileDeleteOnClose;
 
         FileActivityEvent ev = Classify(io);
 
@@ -398,6 +496,7 @@ public sealed class FileIoClassifierTests
         Assert.Equal(FileOperation.Delete, ev.Operation);
         Assert.Null(ev.Detail);
         Assert.Equal(0L, ev.Bytes);
+        Assert.Equal(FileEventFlags.None, ev.Flags);
     }
 
     [Theory]
@@ -596,19 +695,23 @@ public sealed class FileIoClassifierTests
 
         Assert.Equal(expected, ev.Operation);
         Assert.Equal(expected == FileOperation.SetInfo ? "delete cancelled" : null, ev.Detail);
+        Assert.Equal(expected == FileOperation.SetInfo ? FileEventFlags.DeleteCancelled : FileEventFlags.None, ev.Flags);
     }
 
-    [Fact]
-    public void SetInfo_DispositionWithoutTheDeleteFlag_IsACancel()
+    [Theory]
+    [InlineData(FileIoClassifier.FileDispositionInformation, 0x0UL)]
+    [InlineData(FileIoClassifier.FileDispositionInformationEx, 0x8UL)] // ON_CLOSE alone clears delete-on-close
+    public void SetInfo_DispositionWithoutTheDeleteFlag_IsACancel(int infoClass, ulong extraInfo)
     {
         PendingIo io = Completed(Io(RawFileOp.SetInfo), status: 0, info: 0);
-        io.InfoClass = FileIoClassifier.FileDispositionInformation;
-        io.ExtraInfo = 0;
+        io.InfoClass = infoClass;
+        io.ExtraInfo = extraInfo;
 
         FileActivityEvent ev = Classify(io);
 
         Assert.Equal(FileOperation.SetInfo, ev.Operation);
         Assert.Equal("delete cancelled", ev.Detail);
+        Assert.Equal(FileEventFlags.DeleteCancelled, ev.Flags);
     }
 
     [Fact]

@@ -44,7 +44,10 @@ internal sealed class PendingIo
     public string ProcessName = "";
 
     // Read / Write
-    public int IoSize;
+
+    /// <summary>Requested bytes, 0 to 4 GiB - 1; see <see cref="RequestSize"/>.</summary>
+    public long IoSize;
+
     public long Offset = -1;
     public int IrpFlags;
 
@@ -84,4 +87,10 @@ internal sealed class PendingIo
     /// time, so completions and paths logged from then on belong to a later use of the address.
     /// </summary>
     public long ReusedQpc = long.MaxValue;
+
+    /// <summary>
+    /// The request size of a FileIo_ReadWrite event. The kernel field is a ULONG, so one request can ask
+    /// for up to 4 GiB - 1, but TraceEvent returns it as an int, which is negative from 2 GiB on.
+    /// </summary>
+    public static long RequestSize(int tracedIoSize) => unchecked((uint)tracedIoSize);
 }

@@ -60,4 +60,17 @@ public enum FileEventFlags : byte
 
     /// <summary>The file's end-of-file was set (truncated or extended); <see cref="FileActivityEvent.Bytes"/> is the new size.</summary>
     SizeChange = 16,
+
+    /// <summary>
+    /// A SetInfo that cancels a pending delete: FileDispositionInformation with DeleteFile = FALSE, or
+    /// FileDispositionInformationEx without FILE_DISPOSITION_DELETE (which also clears delete-on-close).
+    /// </summary>
+    DeleteCancelled = 32,
+
+    /// <summary>
+    /// An open that accepts a folder as well as a file (it asked for neither FILE_DIRECTORY_FILE nor
+    /// FILE_NON_DIRECTORY_FILE, as FILE_FLAG_BACKUP_SEMANTICS does), so the target may be a folder.
+    /// Folder watchers, backup tools and metadata queries open folders this way.
+    /// </summary>
+    MaybeDirectory = 64,
 }

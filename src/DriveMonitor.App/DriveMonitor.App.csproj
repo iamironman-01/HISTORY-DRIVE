@@ -6,12 +6,24 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>DriveMonitor</AssemblyName>
     <RootNamespace>DriveMonitor.App</RootNamespace>
+    <RuntimeIdentifiers>$(DriveMonitorRuntimeIdentifiers)</RuntimeIdentifiers>
     <!-- Kernel file tracing needs administrator rights, so the GUI always asks for elevation. -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\DriveMonitor.Core\DriveMonitor.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      TraceEvent loads its native DLLs from <architecture>\ next to its own assembly or, in a single-file
+      app, next to the exe; KernelTraceControl.dll is needed to start the kernel session. A single-file
+      bundle would extract them to a temporary folder, where TraceEvent does not look, so they stay
+      beside the exe.
+    -->
+    <None Update="@(None->WithMetadataValue('Filename', 'KernelTraceControl'))" ExcludeFromSingleFile="true" />
+    <None Update="@(None->WithMetadataValue('Filename', 'msdia140'))" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
 </Project>

@@ -11,6 +11,17 @@ namespace DriveMonitor.Core.Aggregation;
 /// Paging I/O (lazy writer, read-ahead, memory-mapped files) repeats bytes an application
 /// already moved through the cache, so it goes into separate "paging" totals and is not
 /// attributed to processes. Failed operations are counted but change no totals.
+/// <para>
+/// Events arrive roughly, not strictly, in time order: the kernel delivers each processor's buffer
+/// on its own, up to a flush interval apart. First and last values, and whether a file is deleted,
+/// therefore follow the event timestamps rather than the order of arrival.
+/// </para>
+/// <para>
+/// Memory stays bounded however long monitoring runs: at most <see cref="MaxTrackedFiles"/> files and
+/// <see cref="MaxTrackedProcesses"/> processes get rows. Events beyond either limit still count in the
+/// drive totals and in the other table, and are counted in <see cref="UntrackedEvents"/> or
+/// <see cref="UntrackedProcessEvents"/>.
+/// </para>
 /// </remarks>
 public sealed class ActivityAggregator
 {
@@ -19,19 +30,32 @@ public sealed class ActivityAggregator
 
     private readonly object _sync = new();
     private readonly Dictionary<string, FileEntry> _files = new(StringComparer.OrdinalIgnoreCase);
+
+    // Folders without a row, remembered when they are opened as folders or listed: Windows reports their
+    // delete or rename without the folder flag, and lets a backup-semantics open take a folder or a file.
+    private readonly HashSet<string> _folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<char, DriveEntry> _drives = new();
     private readonly Dictionary<(int Pid, string Name), ProcessEntry> _processes = new();
     private HashSet<FileEntry> _changedFiles = new(ReferenceEqualityComparer.Instance);
     private HashSet<ProcessEntry> _changedProcesses = new(ReferenceEqualityComparer.Instance);
     private long _failedEvents;
     private long _untrackedEvents;
+    private long _untrackedProcessEvents;
 
-    public ActivityAggregator(int maxTrackedFiles = 200_000)
+    public ActivityAggregator(int maxTrackedFiles = 200_000, int maxTrackedProcesses = 50_000)
     {
         MaxTrackedFiles = maxTrackedFiles;
+        MaxTrackedProcesses = maxTrackedProcesses;
     }
 
+    /// <summary>Distinct files and folders with a row; also bounds the folders remembered without one.</summary>
     public int MaxTrackedFiles { get; }
+
+    /// <summary>
+    /// Distinct processes (process ID and name) with a row. Every short-lived program that touches a
+    /// monitored drive adds one, so without a limit a long session would keep growing.
+    /// </summary>
+    public int MaxTrackedProcesses { get; }
 
     /// <summary>Operations that completed with an error (not part of any total).</summary>
     public long FailedEvents => Interlocked.Read(ref _failedEvents);
@@ -39,12 +63,27 @@ public sealed class ActivityAggregator
     /// <summary>Events for new files that arrived after <see cref="MaxTrackedFiles"/> was reached.</summary>
     public long UntrackedEvents => Interlocked.Read(ref _untrackedEvents);
 
+    /// <summary>
+    /// Events of new processes that arrived after <see cref="MaxTrackedProcesses"/> was reached. They still
+    /// count in the drive and file totals. Paging I/O is never attributed to a process, so it is not counted here.
+    /// </summary>
+    public long UntrackedProcessEvents => Interlocked.Read(ref _untrackedProcessEvents);
+
     public int TrackedFiles
     {
         get
         {
             lock (_sync)
                 return _files.Count;
+        }
+    }
+
+    public int TrackedProcesses
+    {
+        get
+        {
+            lock (_sync)
+                return _processes.Count;
         }
     }
 
@@ -60,7 +99,8 @@ public sealed class ActivityAggregator
         {
             DriveEntry drive = GetDrive(ev.Drive);
             drive.Events++;
-            drive.LastActivity = ev.Timestamp;
+            if (ev.Timestamp > drive.LastActivity)
+                drive.LastActivity = ev.Timestamp;
 
             FileEntry? file = GetOrAddFile(ev);
             ProcessEntry? process = ev.IsPaging ? null : GetProcess(ev);
@@ -119,9 +159,9 @@ public sealed class ActivityAggregator
                         process.Creates++;
                     if (file is not null)
                     {
-                        file.Lifecycle = (file.Lifecycle | FileLifecycle.Created) & ~FileLifecycle.Deleted;
-                        if ((ev.Flags & FileEventFlags.DeleteOnClose) != 0)
-                            file.Lifecycle |= FileLifecycle.Deleted;
+                        // A new file replaces a deleted one, unless it is itself deleted when closed.
+                        file.Lifecycle |= FileLifecycle.Created;
+                        file.SetDeleted((ev.Flags & FileEventFlags.DeleteOnClose) != 0, ev.Timestamp);
                     }
 
                     break;
@@ -131,7 +171,7 @@ public sealed class ActivityAggregator
                     {
                         file.Opens++;
                         if ((ev.Flags & FileEventFlags.DeleteOnClose) != 0)
-                            file.Lifecycle |= FileLifecycle.Deleted;
+                            file.SetDeleted(true, ev.Timestamp);
                     }
 
                     break;
@@ -141,7 +181,7 @@ public sealed class ActivityAggregator
                     if (process is not null)
                         process.Deletes++;
                     if (file is not null)
-                        file.Lifecycle |= FileLifecycle.Deleted;
+                        file.SetDeleted(true, ev.Timestamp);
                     break;
 
                 case FileOperation.Rename:
@@ -149,37 +189,33 @@ public sealed class ActivityAggregator
                     if (process is not null)
                         process.Renames++;
                     if (file is not null)
-                    {
-                        file.Lifecycle |= FileLifecycle.Renamed;
-                        if (ev.TargetPath is not null)
-                            file.RenamedTo = ev.TargetPath;
-                    }
-
+                        file.Renamed(ev.TargetPath, ev.Timestamp);
                     break;
 
                 case FileOperation.SetInfo when file is not null && (ev.Flags & FileEventFlags.SizeChange) != 0:
                     file.Lifecycle |= FileLifecycle.Resized;
                     break;
+
+                // The file is kept after all. This follows the usual single handle: another handle opened with
+                // delete-on-close would still delete it.
+                case FileOperation.SetInfo when file is not null && (ev.Flags & FileEventFlags.DeleteCancelled) != 0:
+                    file.SetDeleted(false, ev.Timestamp);
+                    break;
             }
 
             if (file is not null)
             {
-                file.LastSeen = ev.Timestamp;
-                file.LastOperation = ev.Operation;
+                file.Seen(ev);
                 if (!ev.IsPaging)
-                {
-                    file.LastProcess = ev.ProcessName;
                     file.AddProcess(ev.ProcessName);
-                }
-
                 _changedFiles.Add(file);
             }
 
             if (process is not null)
             {
-                process.LastSeen = ev.Timestamp;
+                process.Seen(ev.Timestamp);
                 if (file is not null)
-                    process.Files.Add(file);
+                    process.AddFile(file);
                 _changedProcesses.Add(process);
             }
         }
@@ -253,6 +289,7 @@ public sealed class ActivityAggregator
         lock (_sync)
         {
             _files.Clear();
+            _folders.Clear();
             _drives.Clear();
             _processes.Clear();
             _changedFiles.Clear();
@@ -261,6 +298,7 @@ public sealed class ActivityAggregator
 
         Interlocked.Exchange(ref _failedEvents, 0);
         Interlocked.Exchange(ref _untrackedEvents, 0);
+        Interlocked.Exchange(ref _untrackedProcessEvents, 0);
     }
 
     private DriveEntry GetDrive(char letter)
@@ -276,14 +314,21 @@ public sealed class ActivityAggregator
 
     private FileEntry? GetOrAddFile(FileActivityEvent ev)
     {
+        bool? folder = FolderEvidence(ev);
         if (_files.TryGetValue(ev.Path, out FileEntry? file))
-            return file;
-
-        // Folder opens and listings would flood the table while someone browses; folders get a
-        // row only when created, deleted or renamed.
-        if (ev.Operation == FileOperation.List
-            || (ev.IsDirectory && ev.Operation is not (FileOperation.Create or FileOperation.Delete or FileOperation.Rename)))
         {
+            // A path changes type when it is deleted and created again as the other type, and the evidence
+            // can arrive after the delete or rename that created the row.
+            if (folder is bool isFolder)
+                file.IsDirectory = isFolder;
+            return file;
+        }
+
+        bool directory = folder ?? (_folders.Count > 0 && _folders.Contains(ev.Path));
+        if (!WantsRow(ev, directory))
+        {
+            if (folder == true)
+                RememberFolder(ev.Path);
             return null;
         }
 
@@ -293,26 +338,94 @@ public sealed class ActivityAggregator
             return null;
         }
 
-        file = new FileEntry(ev.Path, ev.Drive, ev.IsDirectory, ev.Timestamp);
+        // From here on the row holds the type, so the path need not be remembered.
+        if (_folders.Count > 0)
+            _folders.Remove(ev.Path);
+        file = new FileEntry(ev.Path, ev.Drive, directory, ev.Timestamp);
         _files.Add(ev.Path, file);
         return file;
     }
 
-    private ProcessEntry GetProcess(FileActivityEvent ev)
+    private void RememberFolder(string path)
     {
-        var key = (ev.ProcessId, ev.ProcessName);
-        if (!_processes.TryGetValue(key, out ProcessEntry? process))
+        // Bounded like the file table. Starting over keeps the folders seen last, which is what a delete or
+        // rename right after the open or listing needs.
+        if (_folders.Count >= MaxTrackedFiles)
         {
-            process = new ProcessEntry(ev.ProcessId, ev.ProcessName, ev.Timestamp);
-            _processes.Add(key, process);
+            if (_folders.Contains(path))
+                return;
+            _folders.Clear();
         }
 
+        _folders.Add(path);
+    }
+
+    /// <summary>
+    /// Folder opens and listings would flood the table while someone browses, so a folder gets a row only
+    /// when it is created, deleted or renamed. An open that may have taken a folder (folder watchers open
+    /// them that way) gets none either unless it deletes; once the path has a row, it counts there.
+    /// </summary>
+    private static bool WantsRow(FileActivityEvent ev, bool directory)
+    {
+        if (ev.Operation == FileOperation.List)
+            return false;
+
+        bool changesPath = ev.Operation is FileOperation.Create or FileOperation.Delete or FileOperation.Rename
+            || (ev.Flags & FileEventFlags.DeleteOnClose) != 0;
+        return changesPath || (!directory && (ev.Flags & FileEventFlags.MaybeDirectory) == 0);
+    }
+
+    /// <summary>True when the event shows its path to be a folder, false when it shows a file, null when it cannot tell.</summary>
+    private static bool? FolderEvidence(FileActivityEvent ev)
+    {
+        if (ev.IsDirectory || ev.Operation == FileOperation.List)
+            return true;
+
+        switch (ev.Operation)
+        {
+            // Only a request with FILE_DIRECTORY_FILE (the Directory flag) creates a folder, and an open without it
+            // refuses folders unless it accepted either type (MaybeDirectory).
+            case FileOperation.Create:
+                return false;
+            case FileOperation.Open:
+                return (ev.Flags & FileEventFlags.MaybeDirectory) != 0 ? null : false;
+
+            // Applications cannot read, write or resize a folder; paging I/O can reach a folder's index.
+            case FileOperation.Read or FileOperation.Write:
+                return ev.IsPaging ? null : false;
+            case FileOperation.SetInfo when (ev.Flags & FileEventFlags.SizeChange) != 0:
+                return false;
+            default:
+                return null;
+        }
+    }
+
+    private ProcessEntry? GetProcess(FileActivityEvent ev)
+    {
+        var key = (ev.ProcessId, ev.ProcessName);
+        if (_processes.TryGetValue(key, out ProcessEntry? process))
+            return process;
+
+        if (_processes.Count >= MaxTrackedProcesses)
+        {
+            Interlocked.Increment(ref _untrackedProcessEvents);
+            return null;
+        }
+
+        process = new ProcessEntry(ev.ProcessId, ev.ProcessName, ev.Timestamp);
+        _processes.Add(key, process);
         return process;
     }
 
     private sealed class FileEntry(string path, char drive, bool isDirectory, DateTime firstSeen)
     {
-        private readonly DateTime _firstSeen = firstSeen;
+        private DateTime _firstSeen = firstSeen;
+
+        // Timestamps of the events that last set LastProcess, RenamedTo and the Deleted flag, so that an
+        // event delivered late cannot overwrite what a newer one set.
+        private DateTime _lastProcessAt;
+        private DateTime _renamedAt;
+        private DateTime _deletedAt;
         private List<string>? _processNames;
 
         // Names beyond the first MaxNamesPerFile: only counted, so a set keeps repeats from inflating the count.
@@ -323,6 +436,7 @@ public sealed class ActivityAggregator
         private string _processesText = "";
 
         public string Path { get; } = path;
+        public bool IsDirectory = isDirectory;
         public long Reads;
         public long Writes;
         public long BytesRead;
@@ -337,6 +451,47 @@ public sealed class ActivityAggregator
         public string? RenamedTo;
 
         private int ProcessCount => (_processNames?.Count ?? 0) + (_extraNames?.Count ?? 0);
+
+        /// <summary>Updates the first and last values; of two events with the same timestamp, the one recorded last wins.</summary>
+        public void Seen(FileActivityEvent ev)
+        {
+            if (ev.Timestamp < _firstSeen)
+                _firstSeen = ev.Timestamp;
+
+            if (ev.Timestamp >= LastSeen)
+            {
+                LastSeen = ev.Timestamp;
+                LastOperation = ev.Operation;
+            }
+
+            // Ordered on its own: paging I/O names no process, and a newer paging event must not stop an older
+            // application event, delivered after it, from naming its process.
+            if (!ev.IsPaging && ev.Timestamp >= _lastProcessAt)
+            {
+                _lastProcessAt = ev.Timestamp;
+                LastProcess = ev.ProcessName;
+            }
+        }
+
+        /// <summary>Sets or clears Deleted, unless a later delete, cancel or create has already decided it.</summary>
+        public void SetDeleted(bool deleted, DateTime at)
+        {
+            if (at < _deletedAt)
+                return;
+
+            _deletedAt = at;
+            Lifecycle = deleted ? Lifecycle | FileLifecycle.Deleted : Lifecycle & ~FileLifecycle.Deleted;
+        }
+
+        public void Renamed(string? target, DateTime at)
+        {
+            Lifecycle |= FileLifecycle.Renamed;
+            if (target is not null && at >= _renamedAt)
+            {
+                _renamedAt = at;
+                RenamedTo = target;
+            }
+        }
 
         public void AddProcess(string name)
         {
@@ -365,7 +520,7 @@ public sealed class ActivityAggregator
         }
 
         public FileStatsSnapshot Snapshot() => new(
-            Path, drive, isDirectory, Reads, Writes, BytesRead, BytesWritten, PagingBytesRead, PagingBytesWritten,
+            Path, drive, IsDirectory, Reads, Writes, BytesRead, BytesWritten, PagingBytesRead, PagingBytesWritten,
             Opens, Lifecycle, _firstSeen, LastSeen, LastOperation, LastProcess, _processesText, ProcessCount, RenamedTo);
     }
 
@@ -389,8 +544,10 @@ public sealed class ActivityAggregator
 
     private sealed class ProcessEntry(int processId, string name, DateTime firstSeen)
     {
-        private readonly DateTime _firstSeen = firstSeen;
-        public readonly HashSet<FileEntry> Files = new(ReferenceEqualityComparer.Instance);
+        private DateTime _firstSeen = firstSeen;
+
+        // Created with the first file row: folder watchers, listings and I/O on untracked files touch none.
+        private HashSet<FileEntry>? _files;
         public long Reads;
         public long Writes;
         public long BytesRead;
@@ -400,7 +557,21 @@ public sealed class ActivityAggregator
         public long Renames;
         public DateTime LastSeen = firstSeen;
 
+        public void Seen(DateTime at)
+        {
+            if (at < _firstSeen)
+                _firstSeen = at;
+            if (at > LastSeen)
+                LastSeen = at;
+        }
+
+        public void AddFile(FileEntry file)
+        {
+            _files ??= new HashSet<FileEntry>(ReferenceEqualityComparer.Instance);
+            _files.Add(file);
+        }
+
         public ProcessStatsSnapshot Snapshot() => new(
-            processId, name, Reads, Writes, BytesRead, BytesWritten, Creates, Deletes, Renames, Files.Count, _firstSeen, LastSeen);
+            processId, name, Reads, Writes, BytesRead, BytesWritten, Creates, Deletes, Renames, _files?.Count ?? 0, _firstSeen, LastSeen);
     }
 }

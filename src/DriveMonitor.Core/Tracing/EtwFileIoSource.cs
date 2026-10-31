@@ -519,7 +519,7 @@ internal sealed class EtwFileIoSource : IDisposable
                 ProcessId = pid,
                 ThreadId = d.ThreadID,
                 ProcessName = ProcessName(pid, d),
-                IoSize = d.IoSize,
+                IoSize = PendingIo.RequestSize(d.IoSize),
                 Offset = d.Offset,
                 IrpFlags = d.IoFlags,
             });

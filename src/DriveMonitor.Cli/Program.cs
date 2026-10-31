@@ -1,4 +1,5 @@
 ﻿using System.Globalization;
+using System.Reflection;
 using DriveMonitor.Core;
 using DriveMonitor.Core.Models;
 using DriveMonitor.Core.Volumes;
@@ -28,6 +29,12 @@ internal static class Program
             return 0;
         }
 
+        if (options.ShowVersion)
+        {
+            Console.WriteLine($"drivemon {InformationalVersion()}");
+            return 0;
+        }
+
         if (options.ListDrives)
         {
             PrintDrives();
@@ -36,6 +43,11 @@ internal static class Program
 
         return options.SelfTest ? SelfTest.Run(options) : LiveMonitor.Run(options);
     }
+
+    /// <summary>The version stamped in at build time, e.g. 0.1.0+&lt;commit SHA&gt; (see Directory.Build.props).</summary>
+    private static string InformationalVersion() =>
+        typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? "unknown";
 
     private static void PrintDrives()
     {
@@ -55,6 +67,7 @@ internal static class Program
 internal sealed class CliOptions
 {
     public bool ShowHelp { get; private set; }
+    public bool ShowVersion { get; private set; }
     public bool ListDrives { get; private set; }
     public bool SelfTest { get; private set; }
     public char? SelfTestDrive { get; private set; }
@@ -81,6 +94,9 @@ internal sealed class CliOptions
             {
                 case "-h" or "--help" or "/?":
                     o.ShowHelp = true;
+                    break;
+                case "--version":
+                    o.ShowVersion = true;
                     break;
                 case "--list":
                     o.ListDrives = true;
@@ -164,6 +180,7 @@ internal sealed class CliOptions
         w.WriteLine("      --no-summary     Do not print per-file totals on exit");
         w.WriteLine("      --report FILE    Self-test: also save the report to FILE");
         w.WriteLine("  -h, --help           Show this help");
+        w.WriteLine("      --version        Show the version and exit");
         w.WriteLine();
         w.WriteLine("Needs an administrator command prompt (kernel tracing requires it).");
     }

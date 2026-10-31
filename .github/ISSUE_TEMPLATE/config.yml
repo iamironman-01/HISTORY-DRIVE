@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/iamironman-01/HISTORY-DRIVE/security/policy
+    about: Report vulnerabilities privately, as the security policy describes, not in a public issue.
+  - name: Troubleshooting guide
+    url: https://github.com/iamironman-01/HISTORY-DRIVE/blob/main/docs/TROUBLESHOOTING.md
+    about: Smart App Control, administrator rights, error messages, and lost or unnamed events.
