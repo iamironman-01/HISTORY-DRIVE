@@ -79,7 +79,11 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     /// <summary>Events discarded because nobody drained the queue fast enough.</summary>
     public long DroppedEvents => Interlocked.Read(ref _dropped);
 
-    /// <summary>I/O whose file name was unknown (typically files opened before monitoring started).</summary>
+    /// <summary>
+    /// I/O whose file name was unknown (typically files opened before monitoring started), counted for
+    /// the whole system rather than only the monitored drives: without a name the drive is unknown, so
+    /// the drive filter cannot apply.
+    /// </summary>
     public long UnnamedEvents => Interlocked.Read(ref _unnamed);
 
     /// <summary>Events the kernel dropped because the consumer fell behind.</summary>

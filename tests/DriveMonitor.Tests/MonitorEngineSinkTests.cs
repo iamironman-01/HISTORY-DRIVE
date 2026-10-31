@@ -104,6 +104,19 @@ public sealed class MonitorEngineSinkTests
     }
 
     [Fact]
+    public void TryAccept_UnnamedEvents_AreCountedEvenWithNoDriveMonitored()
+    {
+        using var engine = new MonitorEngine();
+        IFileIoSink sink = engine;
+
+        Assert.False(Accept(sink, "", OtherProcessId, out _));
+        Assert.False(Accept(sink, @"F:\named.txt", OtherProcessId, out _));
+
+        // Without a name the drive is unknown, so the count cannot be limited to the monitored drives.
+        Assert.Equal(1L, engine.UnnamedEvents);
+    }
+
+    [Fact]
     public void TryAccept_OwnProcess_IsExcludedUnlessThatIsSwitchedOff()
     {
         using MonitorEngine engine = CreateEngine();
