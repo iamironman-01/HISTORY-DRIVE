@@ -196,6 +196,12 @@
           "DriveMonitor.Core": "[0.1.0, )"
         }
       },
+      "DriveMonitor": {
+        "type": "Project",
+        "dependencies": {
+          "DriveMonitor.Core": "[0.1.0, )"
+        }
+      },
       "drivemonitor.core": {
         "type": "Project",
         "dependencies": {

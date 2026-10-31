@@ -20,6 +20,14 @@ internal interface IFileIoSink
 
     void OnBegin(PendingIo io);
 
+    /// <summary>
+    /// An initiation that does not reach <see cref="OnBegin"/>: rejected by <see cref="TryAccept"/>, or of
+    /// a kind DriveMonitor does not report (cleanup, close, query, file-system control, change
+    /// notification, and folder listings when they are not captured). Its request address is busy from
+    /// <paramref name="timestampQpc"/> on, so the completions that follow there are not an earlier operation's.
+    /// </summary>
+    void OnForeignBegin(ulong irp, long timestampQpc);
+
     void OnComplete(ulong irp, long timestampQpc, ulong extraInfo, int ntStatus);
 
     /// <summary>A path from a FileIo_PathOperation event (rename or hard-link target), already converted to a DOS path when possible.</summary>
@@ -54,6 +62,9 @@ internal sealed class EtwFileIoSource : IDisposable
 
     private const int MaxCachedNames = 500_000;
     private const int ErrorNoSystemResources = unchecked((int)0x800705AA);
+
+    /// <summary>How often the lost-event count is read when <see cref="MonitorOptions.FlushIntervalMs"/> sets no timer of its own.</summary>
+    private const int EventsLostPollMs = 1000;
 
     private readonly IFileIoSink _sink;
     private readonly ProcessNameCache _processNames;
@@ -102,7 +113,10 @@ internal sealed class EtwFileIoSource : IDisposable
 
     public string? RundownError { get; private set; }
 
-    /// <summary>Events the kernel dropped because the consumer fell behind (live while running, last value after).</summary>
+    /// <summary>
+    /// Events the kernel dropped because the consumer fell behind (live while running, last value after).
+    /// The timer also reads it, so a session that another program stops leaves out at most one tick of losses.
+    /// </summary>
     public int EventsLost
     {
         get
@@ -110,17 +124,7 @@ internal sealed class EtwFileIoSource : IDisposable
             lock (_sessionLock)
             {
                 if (_session is not null && !_stopping)
-                {
-                    try
-                    {
-                        _eventsLost = _session.EventsLost;
-                    }
-                    catch (Exception)
-                    {
-                        // The session is ending; keep the last known value.
-                    }
-                }
-
+                    ReadEventsLost(_session);
                 return _eventsLost;
             }
         }
@@ -181,8 +185,11 @@ internal sealed class EtwFileIoSource : IDisposable
 
         if (_options.RequestFileNameRundown)
             RequestFileNameRundown(session);
-        if (_options.FlushIntervalMs > 0)
-            _flushTimer = new Timer(_ => FlushBuffers(), null, _options.FlushIntervalMs, _options.FlushIntervalMs);
+
+        // Runs even when nothing is flushed: once another program stops the session, its lost-event
+        // count can no longer be read, so the timer keeps a recent copy.
+        int period = _options.FlushIntervalMs > 0 ? _options.FlushIntervalMs : EventsLostPollMs;
+        _flushTimer = new Timer(_ => FlushBuffers(), null, period, period);
     }
 
     public void Stop()
@@ -195,17 +202,7 @@ internal sealed class EtwFileIoSource : IDisposable
         {
             session = _session;
             if (session is not null)
-            {
-                try
-                {
-                    _eventsLost = session.EventsLost;
-                }
-                catch (Exception)
-                {
-                    // Already gone.
-                }
-            }
-
+                ReadEventsLost(session);
             _session = null;
         }
 
@@ -294,7 +291,19 @@ internal sealed class EtwFileIoSource : IDisposable
         if (_options.CaptureDirectoryListings)
             kernel.FileIODirEnum += OnDirEnum;
         if (_options.UseCompletionEvents)
+        {
             kernel.FileIOOperationEnd += OnOperationEnd;
+
+            // Not reported, but they occupy a request address like any other operation and their
+            // completions arrive all the same, so the correlator has to know when they start.
+            kernel.FileIOCleanup += OnForeignSimpleOp;
+            kernel.FileIOQueryInfo += OnForeignInfo;
+            kernel.FileIOFSControl += OnForeignInfo;
+            kernel.FileIODirNotify += OnForeignDirEnum;
+            if (!_options.CaptureDirectoryListings)
+                kernel.FileIODirEnum += OnForeignDirEnum;
+        }
+
         if (_options.ParsePathOperations)
             source.UnhandledEvents += OnUnhandled;
     }
@@ -330,20 +339,39 @@ internal sealed class EtwFileIoSource : IDisposable
 
     private void FlushBuffers()
     {
-        // TraceEvent fixes the kernel flush timer at 1 s; flushing more often shortens the delay
-        // before events reach the screen.
         lock (_sessionLock)
         {
             if (_session is null || _stopping)
                 return;
-            try
+
+            // TraceEvent fixes the kernel flush timer at 1 s; flushing more often shortens the delay
+            // before events reach the screen.
+            if (_options.FlushIntervalMs > 0)
             {
-                _session.Flush();
+                try
+                {
+                    _session.Flush();
+                }
+                catch (Exception)
+                {
+                    // Session ending.
+                }
             }
-            catch (Exception)
-            {
-                // Session ending.
-            }
+
+            ReadEventsLost(_session);
+        }
+    }
+
+    /// <summary>Keeps the kernel's count of lost events while the session can still report it. Call under <c>_sessionLock</c>.</summary>
+    private void ReadEventsLost(TraceEventSession session)
+    {
+        try
+        {
+            _eventsLost = session.EventsLost;
+        }
+        catch (Exception)
+        {
+            // The session is ending or was stopped by another program: keep the last count read.
         }
     }
 
@@ -389,6 +417,43 @@ internal sealed class EtwFileIoSource : IDisposable
         {
             // Close, not Cleanup: paging I/O can still use the file object after its last handle closed.
             _nameByFileObject.Remove(d.FileObject);
+            _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
+        }
+        catch (Exception ex)
+        {
+            RecordCallbackError(ex);
+        }
+    }
+
+    private void OnForeignSimpleOp(FileIOSimpleOpTraceData d)
+    {
+        try
+        {
+            _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
+        }
+        catch (Exception ex)
+        {
+            RecordCallbackError(ex);
+        }
+    }
+
+    private void OnForeignInfo(FileIOInfoTraceData d)
+    {
+        try
+        {
+            _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
+        }
+        catch (Exception ex)
+        {
+            RecordCallbackError(ex);
+        }
+    }
+
+    private void OnForeignDirEnum(FileIODirEnumTraceData d)
+    {
+        try
+        {
+            _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
         }
         catch (Exception ex)
         {
@@ -405,7 +470,10 @@ internal sealed class EtwFileIoSource : IDisposable
             Remember(_nameByFileObject, d.FileObject, path);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {
@@ -441,7 +509,10 @@ internal sealed class EtwFileIoSource : IDisposable
             string path = ResolveName(d.FileName, d.FileKey, d.FileObject);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {
@@ -456,7 +527,7 @@ internal sealed class EtwFileIoSource : IDisposable
                 ProcessId = pid,
                 ThreadId = d.ThreadID,
                 ProcessName = ProcessName(pid, d),
-                IoSize = d.IoSize,
+                IoSize = PendingIo.RequestSize(d.IoSize),
                 Offset = d.Offset,
                 IrpFlags = d.IoFlags,
             });
@@ -481,7 +552,10 @@ internal sealed class EtwFileIoSource : IDisposable
             string path = ResolveName(d.FileName, d.FileKey, d.FileObject);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {
@@ -514,7 +588,10 @@ internal sealed class EtwFileIoSource : IDisposable
             string path = ResolveName(d.FileName, d.FileKey, d.FileObject);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {
@@ -545,7 +622,10 @@ internal sealed class EtwFileIoSource : IDisposable
             string path = ResolveName(d.DirectoryName, d.FileKey, d.FileObject);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {

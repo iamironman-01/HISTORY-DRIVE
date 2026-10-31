@@ -9,7 +9,8 @@ namespace DriveMonitor.App.ViewModels;
 
 /// <summary>
 /// One row of the Live activity list: a single operation, or identical ones grouped together (same
-/// operation, file, process, paging flag and outcome, each within a second of the previous one).
+/// operation, file, process, paging flag, outcome, NTSTATUS and detail, except that size changes group
+/// whatever the new size; each within a second of the previous one).
 /// </summary>
 /// <remarks>
 /// Only the grouped totals change after creation, and they are announced with one PropertyChanged

@@ -62,6 +62,9 @@ public sealed class FileRowViewModel : ObservableObject
     /// <summary>Up to three process names, plus "+N more".</summary>
     public string Processes => _stats.Processes;
 
+    /// <summary>Every process name, for the search; null when <see cref="Processes"/> already names them all.</summary>
+    public IReadOnlyList<string>? ProcessNames => _stats.ProcessNames;
+
     /// <summary>New path of the last rename, when Windows reported it.</summary>
     public string? RenamedTo => _stats.RenamedTo;
 

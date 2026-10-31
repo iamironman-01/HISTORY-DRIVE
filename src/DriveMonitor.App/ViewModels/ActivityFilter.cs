@@ -32,14 +32,31 @@ public sealed class ActivityFilter
         && (ShowFailed || !row.IsFailed)
         && (Search.Length == 0 || Matches(row.Path) || Matches(row.TargetPath) || Matches(row.ProcessName));
 
-    /// <summary>The ICollectionView filter of the Files table.</summary>
+    /// <summary>
+    /// The ICollectionView filter of the Files table. The Processes column names three processes at most, so the
+    /// others a file has are matched from <see cref="FileRowViewModel.ProcessNames"/>.
+    /// </summary>
     public bool AcceptsFile(object item) =>
         item is FileRowViewModel row
-        && (Search.Length == 0 || Matches(row.Path) || Matches(row.RenamedTo) || Matches(row.Processes));
+        && (Search.Length == 0 || Matches(row.Path) || Matches(row.RenamedTo) || Matches(row.Processes)
+            || Matches(row.LastProcess) || MatchesAny(row.ProcessNames));
 
     /// <summary>The ICollectionView filter of the Processes table.</summary>
     public bool AcceptsProcess(object item) =>
         item is ProcessRowViewModel row && (Search.Length == 0 || Matches(row.ProcessName));
 
     private bool Matches(string? text) => text is not null && text.Contains(Search, StringComparison.OrdinalIgnoreCase);
+
+    private bool MatchesAny(IReadOnlyList<string>? texts)
+    {
+        if (texts is null)
+            return false;
+        for (int i = 0; i < texts.Count; i++)
+        {
+            if (Matches(texts[i]))
+                return true;
+        }
+
+        return false;
+    }
 }

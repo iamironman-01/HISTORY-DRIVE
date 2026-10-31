@@ -34,6 +34,15 @@ public partial class MainWindow : Window
         InitializeComponent();
         ApplySavedBounds(viewModel.Settings);
 
+        // A grid over its own collection view otherwise ties its selection to the view's current item, and every
+        // Reset (a refresh with more than 200 new rows, a search, a re-sort) then collapses a multi-row selection
+        // to that one row. Nothing here uses currency, so each grid keeps the rows the user selected instead.
+        foreach (DataGrid grid in new[] { ActivityGrid, FilesGrid, ProcessesGrid })
+        {
+            grid.IsSynchronizedWithCurrentItem = false;
+            grid.SelectionChanged += OnGridSelectionChanged;
+        }
+
         viewModel.CloseRequested += OnCloseRequested;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         viewModel.Activity.RowsChanging += OnActivityRowsChanging;
@@ -65,6 +74,7 @@ public partial class MainWindow : Window
     {
         base.OnSourceInitialized(e);
         _deviceWatcher = new DeviceChangeWatcher(this);
+        _deviceWatcher.VolumesArrived += OnVolumesArrived;
         _deviceWatcher.VolumesChanged += OnVolumesChanged;
     }
 
@@ -103,6 +113,8 @@ public partial class MainWindow : Window
             _viewModel.ReportBackgroundError(ex);
         }
     }
+
+    private void OnVolumesArrived(object? sender, IReadOnlyList<char> letters) => _viewModel.OnVolumesArrived(letters);
 
     private void OnVolumesChanged(object? sender, EventArgs e) => _viewModel.OnVolumesChanged();
 
@@ -265,6 +277,25 @@ public partial class MainWindow : Window
         view.CustomSort = comparer;
     }
 
+    /// <summary>
+    /// Tells the table how many rows its grid has selected: with thousands selected, adding or removing rows one
+    /// notification at a time costs that many times more, so the table switches to a Reset sooner.
+    /// </summary>
+    private void OnGridSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Selection changes of controls inside the grid bubble up through it too.
+        if (!ReferenceEquals(e.OriginalSource, sender) || sender is not DataGrid grid)
+            return;
+
+        int selected = grid.SelectedItems.Count;
+        if (ReferenceEquals(grid, ActivityGrid))
+            _viewModel.Activity.SelectedCount = selected;
+        else if (ReferenceEquals(grid, FilesGrid))
+            _viewModel.Files.SelectedCount = selected;
+        else
+            _viewModel.Processes.SelectedCount = selected;
+    }
+
     // Row mouse handling: right-click selects the row under the mouse; double-click opens its folder.
 
     private void OnGridPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
@@ -285,9 +316,22 @@ public partial class MainWindow : Window
 
         // Opened by mouse over a header or the empty area, or with nothing selected: nothing to act on.
         bool byMouse = e.CursorLeft >= 0 || e.CursorTop >= 0;
-        if (grid.SelectedItems.Count == 0 || (byMouse && !_rightClickOnRow))
-            e.Handled = true;
+        bool onRows = grid.SelectedItems.Count > 0 && (!byMouse || _rightClickOnRow);
         _rightClickOnRow = false;
+        if (!onRows)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        // The commands act on the rows selected when the menu opened. The grid's own SelectedItems keeps changing
+        // while the menu is open: Live activity removes its oldest rows, and a removed row leaves the selection.
+        if (grid.ContextMenu is { } menu)
+        {
+            List<object> rows = grid.SelectedItems.Cast<object>().ToList();
+            foreach (MenuItem item in menu.Items.OfType<MenuItem>())
+                item.CommandParameter = rows;
+        }
     }
 
     private void OnGridMouseDoubleClick(object sender, MouseButtonEventArgs e)

@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DriveMonitor.Core\DriveMonitor.Core.csproj" />
+    <ProjectReference Include="..\..\src\DriveMonitor.App\DriveMonitor.App.csproj" />
     <ProjectReference Include="..\..\src\DriveMonitor.Cli\DriveMonitor.Cli.csproj" />
   </ItemGroup>
 

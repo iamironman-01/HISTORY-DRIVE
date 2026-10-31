@@ -77,6 +77,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _isElevated = MonitorEngine.IsElevated;
         _engine = new MonitorEngine(new MonitorOptions());
         _engine.Options.ExcludeOwnProcess = settings.HideOwnActivity;
+        _arrivals = new DriveArrivals(_engine.Drives);
 
         ApplyFilterSettings();
         Activity = new ActivityFeed(_filter.AcceptsActivity, settings.MaxRows) { GroupRepeated = settings.GroupRepeated };
@@ -567,6 +568,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         UnnamedText = $"Unnamed {DisplayText.Number(_engine.UnnamedEvents)}";
         TrackedFilesText = $"{DisplayText.Number(_engine.Stats.TrackedFiles)} files tracked";
         DiagnosticsText = BuildDiagnostics();
+
+        // Sorted tables keep a row where it was inserted; rows that grew since are moved to their place now.
+        Activity.ResortChangedRows();
+        Files.ResortChangedRows();
+        Processes.ResortChangedRows();
 
         CheckLogHealth();
         UpdateCounts();
