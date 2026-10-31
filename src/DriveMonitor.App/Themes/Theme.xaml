@@ -520,6 +520,32 @@
         </Setter>
     </Style>
 
+    <!--
+        Names for screen readers. A cell without a name is announced as "Item: <row view model class>,
+        Column Display Index: n", and so is any cell of a template column: UI Automation cannot read text
+        out of a cell template.
+    -->
+    <Style x:Key="TextCell" TargetType="DataGridCell" BasedOn="{StaticResource GridCell}">
+        <Style.Triggers>
+            <!-- Zero counts and absent sizes are shown as empty cells. -->
+            <DataTrigger Binding="{Binding Content.(TextBlock.Text), RelativeSource={RelativeSource Self}, TargetNullValue=''}" Value="">
+                <Setter Property="AutomationProperties.Name" Value="blank" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="OperationCell" TargetType="DataGridCell" BasedOn="{StaticResource GridCell}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding OperationText, Mode=OneWay}" />
+    </Style>
+
+    <Style x:Key="PathCell" TargetType="DataGridCell" BasedOn="{StaticResource GridCell}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding Path, Mode=OneWay}" />
+    </Style>
+
+    <Style x:Key="StatusCell" TargetType="DataGridCell" BasedOn="{StaticResource GridCell}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding StatusText, Mode=OneWay}" />
+    </Style>
+
     <!-- Row background comes from the grid (alternating) unless a trigger below applies. -->
     <Style x:Key="GridRow" TargetType="DataGridRow">
         <Setter Property="SnapsToDevicePixels" Value="True" />
@@ -534,12 +560,56 @@
         </Style.Triggers>
     </Style>
 
+    <!-- Each table's rows name themselves for screen readers; otherwise the row view model's class name is read. -->
     <Style x:Key="ActivityRow" TargetType="DataGridRow" BasedOn="{StaticResource GridRow}">
+        <Setter Property="AutomationProperties.Name">
+            <Setter.Value>
+                <MultiBinding StringFormat="{}{0} {1}, {2}, {3}">
+                    <Binding Path="OperationText" Mode="OneWay" />
+                    <Binding Path="FileName" Mode="OneWay" />
+                    <Binding Path="ProcessName" Mode="OneWay" />
+                    <Binding Path="TimeText" Mode="OneWay" />
+                </MultiBinding>
+            </Setter.Value>
+        </Setter>
         <Style.Triggers>
             <DataTrigger Binding="{Binding IsFailed}" Value="True">
                 <Setter Property="Foreground" Value="{StaticResource FailedBrush}" />
+                <Setter Property="AutomationProperties.Name">
+                    <Setter.Value>
+                        <MultiBinding StringFormat="{}{0} {1} failed, {2}, {3}">
+                            <Binding Path="OperationText" Mode="OneWay" />
+                            <Binding Path="FileName" Mode="OneWay" />
+                            <Binding Path="ProcessName" Mode="OneWay" />
+                            <Binding Path="TimeText" Mode="OneWay" />
+                        </MultiBinding>
+                    </Setter.Value>
+                </Setter>
             </DataTrigger>
         </Style.Triggers>
+    </Style>
+
+    <Style x:Key="FileRow" TargetType="DataGridRow" BasedOn="{StaticResource GridRow}">
+        <Setter Property="AutomationProperties.Name">
+            <Setter.Value>
+                <MultiBinding StringFormat="{}{0}, {1}, {2}">
+                    <Binding Path="FileName" Mode="OneWay" />
+                    <Binding Path="StatusText" Mode="OneWay" />
+                    <Binding Path="Folder" Mode="OneWay" />
+                </MultiBinding>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ProcessRow" TargetType="DataGridRow" BasedOn="{StaticResource GridRow}">
+        <Setter Property="AutomationProperties.Name">
+            <Setter.Value>
+                <MultiBinding StringFormat="{}{0}, PID {1}">
+                    <Binding Path="ProcessName" Mode="OneWay" />
+                    <Binding Path="ProcessId" Mode="OneWay" />
+                </MultiBinding>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style x:Key="DataGridStyle" TargetType="DataGrid">
@@ -570,7 +640,7 @@
         <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
         <Setter Property="KeyboardNavigation.TabNavigation" Value="Once" />
         <Setter Property="ColumnHeaderStyle" Value="{StaticResource GridColumnHeader}" />
-        <Setter Property="CellStyle" Value="{StaticResource GridCell}" />
+        <Setter Property="CellStyle" Value="{StaticResource TextCell}" />
         <Setter Property="RowStyle" Value="{StaticResource GridRow}" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
     </Style>
