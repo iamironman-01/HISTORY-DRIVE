@@ -7,7 +7,10 @@ public enum BannerKind
     /// <summary>Blue: something happened that needs no action.</summary>
     Info,
 
-    /// <summary>Amber: monitoring cannot work until the user acts (administrator rights).</summary>
+    /// <summary>
+    /// Amber: monitoring cannot work until the user acts (administrator rights), or it started although another
+    /// program holds its guard against a second DriveMonitor.
+    /// </summary>
     Warning,
 
     /// <summary>Red: something failed.</summary>

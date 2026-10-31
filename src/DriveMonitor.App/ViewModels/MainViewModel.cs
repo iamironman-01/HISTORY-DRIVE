@@ -713,6 +713,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _lifecycleTask = start;
             await start;
             _lastError = null;
+            if (!_disposed)
+                ShowStartWarning(_engine.StartWarning);
         }
         catch (MonitorStartException ex)
         {
@@ -769,16 +771,34 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _startStopCommand.RaiseCanExecuteChanged();
     }
 
-    private void UpdateState()
+    /// <summary>Shows the engine's state, unless a start or stop is still running.</summary>
+    internal void UpdateState()
     {
         if (_isBusy)
             return;
         SetState(_engine.IsRunning ? MonitorState.Monitoring : _lastError is not null ? MonitorState.Error : MonitorState.Stopped);
     }
 
+    /// <summary>
+    /// After a start: shows what <see cref="MonitorEngine.Start"/> worked around (<see cref="MonitorEngine.StartWarning"/>),
+    /// or removes the warning of an earlier start. The banner does not close by itself; it goes when monitoring stops.
+    /// </summary>
+    internal void ShowStartWarning(string? warning)
+    {
+        if (warning is null)
+            CloseBanner(BannerKeys.StartWarning);
+        else
+            ShowBanner(BannerKeys.StartWarning, BannerKind.Warning, warning);
+    }
+
     private void SetState(MonitorState state)
     {
         _state = state;
+
+        // The start warning is about the kernel session that is running.
+        if (state != MonitorState.Monitoring)
+            CloseBanner(BannerKeys.StartWarning);
+
         OnPropertyChanged(nameof(State));
         OnPropertyChanged(nameof(IsMonitoring));
         OnPropertyChanged(nameof(StartStopText));
@@ -872,6 +892,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         public const string Admin = "admin";
         public const string StartError = "start-error";
+        public const string StartWarning = "start-warning";
         public const string Faulted = "faulted";
         public const string Restarted = "restarted";
         public const string Unexpected = "unexpected";
