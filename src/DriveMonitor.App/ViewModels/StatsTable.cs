@@ -19,6 +19,7 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
     private readonly Action<TRow, TSnapshot> _update;
     private readonly Predicate<object> _filter;
     private readonly List<TRow> _added = [];
+    private readonly ViewResort _resort;
 
     public StatsTable(
         Func<TSnapshot, TKey> keyOf,
@@ -33,6 +34,7 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
         _update = update;
         _filter = filter;
         View = new ListCollectionView(Items);
+        _resort = new ViewResort(View);
     }
 
     public BatchObservableCollection<TRow> Items { get; } = [];
@@ -40,14 +42,29 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
     /// <summary>The filtered (and possibly sorted) rows the grid shows.</summary>
     public ListCollectionView View { get; }
 
+    /// <summary>Rows selected in the grid; see <see cref="BatchObservableCollection{T}.SelectedCount"/>.</summary>
+    public int SelectedCount
+    {
+        get => Items.SelectedCount;
+        set => Items.SelectedCount = value;
+    }
+
     public void Apply(IReadOnlyList<TSnapshot> changed)
     {
+        // The view runs its filter only when a row is added or the view is refreshed, but a search can match
+        // values that change in place: a file read by one more process, or renamed.
+        Predicate<object>? filter = View.Filter;
+        bool matchChanged = false;
         foreach (TSnapshot snapshot in changed)
         {
             TKey key = _keyOf(snapshot);
             if (_rows.TryGetValue(key, out TRow? row))
             {
+                bool matched = filter?.Invoke(row) ?? true;
                 _update(row, snapshot);
+                _resort.RowsChanged();
+                if (filter is not null && filter(row) != matched)
+                    matchChanged = true;
             }
             else
             {
@@ -62,7 +79,18 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
             Items.AddRange(_added);
             _added.Clear();
         }
+
+        // Rare, since a search matches paths and process names rather than totals, so refreshing the whole view
+        // then costs little overall.
+        if (matchChanged)
+        {
+            View.Refresh();
+            _resort.Refreshed();
+        }
     }
+
+    /// <summary>Re-sorts a sorted view whose rows changed in place (see <see cref="ViewResort"/>); call about once a second.</summary>
+    public void ResortChangedRows() => _resort.Run();
 
     public void Clear()
     {
@@ -79,8 +107,9 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
     {
         if (!hasSearch)
         {
-            if (View.Filter is not null)
-                View.Filter = null;
+            if (View.Filter is null)
+                return;
+            View.Filter = null;
         }
         else if (View.Filter is null)
         {
@@ -90,5 +119,8 @@ public sealed class StatsTable<TKey, TSnapshot, TRow>
         {
             View.Refresh();
         }
+
+        // Every way here refreshed the view, which also sorted it again.
+        _resort.Refreshed();
     }
 }

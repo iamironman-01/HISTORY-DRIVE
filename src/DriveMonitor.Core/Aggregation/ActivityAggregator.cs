@@ -428,12 +428,18 @@ public sealed class ActivityAggregator
         private DateTime _deletedAt;
         private List<string>? _processNames;
 
-        // Names beyond the first MaxNamesPerFile: only counted, so a set keeps repeats from inflating the count.
+        // Names beyond the first MaxNamesPerFile: counted and searched but never listed, so a set keeps repeats
+        // from inflating the count.
         private HashSet<string>? _extraNames;
 
         // Every snapshot needs this text, under the lock Record waits for, yet it changes only when a new
         // name arrives; joining the names for each snapshot would cost an allocation per row per refresh.
         private string _processesText = "";
+
+        // Every stored name, for searching once there are more than the text lists. A snapshot is read after the lock
+        // is released, so it gets a copy of the lists above, made again only when a name arrived since the last one.
+        private string[]? _searchNames;
+        private bool _searchNamesStale;
 
         public string Path { get; } = path;
         public bool IsDirectory = isDirectory;
@@ -517,11 +523,25 @@ public sealed class ActivityAggregator
             _processesText = count <= 3
                 ? string.Join(", ", names)
                 : $"{names[0]}, {names[1]}, {names[2]} +{count - 3} more";
+            _searchNamesStale = count > 3;
         }
 
-        public FileStatsSnapshot Snapshot() => new(
-            Path, drive, IsDirectory, Reads, Writes, BytesRead, BytesWritten, PagingBytesRead, PagingBytesWritten,
-            Opens, Lifecycle, _firstSeen, LastSeen, LastOperation, LastProcess, _processesText, ProcessCount, RenamedTo);
+        public FileStatsSnapshot Snapshot()
+        {
+            if (_searchNamesStale)
+            {
+                var all = new string[ProcessCount];
+                _processNames!.CopyTo(all);
+                _extraNames?.CopyTo(all, _processNames.Count);
+                _searchNames = all;
+                _searchNamesStale = false;
+            }
+
+            return new(
+                Path, drive, IsDirectory, Reads, Writes, BytesRead, BytesWritten, PagingBytesRead, PagingBytesWritten,
+                Opens, Lifecycle, _firstSeen, LastSeen, LastOperation, LastProcess, _processesText, ProcessCount, RenamedTo,
+                _searchNames);
+        }
     }
 
     private sealed class DriveEntry(char letter)

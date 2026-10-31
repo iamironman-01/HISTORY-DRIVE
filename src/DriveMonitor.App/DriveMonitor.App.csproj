@@ -26,4 +26,8 @@
     <None Update="@(None->WithMetadataValue('Filename', 'msdia140'))" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="DriveMonitor.Tests" />
+  </ItemGroup>
+
 </Project>

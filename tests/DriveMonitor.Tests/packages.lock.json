@@ -190,6 +190,12 @@
           "xunit.extensibility.core": "[2.9.2]"
         }
       },
+      "DriveMonitor": {
+        "type": "Project",
+        "dependencies": {
+          "DriveMonitor.Core": "[0.1.0, )"
+        }
+      },
       "drivemonitor.core": {
         "type": "Project",
         "dependencies": {

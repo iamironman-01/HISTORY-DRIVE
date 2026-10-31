@@ -25,6 +25,11 @@ public sealed class AppSettings
     public const int MaximumMaxRows = 1_000_000;
     public const double DefaultLeftPanelWidth = 300;
 
+    // Saved window bounds beyond these are not from any real screen. They must stay far below Int32.MaxValue,
+    // where WPF rejects a window size or position with an exception that would stop every start.
+    private const double MaximumWindowSize = 100_000;
+    private const double MaximumWindowOffset = 1_000_000;
+
     public bool ShowReads { get; set; } = true;
 
     public bool ShowWrites { get; set; } = true;
@@ -95,10 +100,11 @@ public sealed class AppSettings
         if (!double.IsFinite(LeftPanelWidth) || LeftPanelWidth < 200 || LeftPanelWidth > 800)
             LeftPanelWidth = DefaultLeftPanelWidth;
 
+        // NaN fails every comparison, so it is dropped as well.
         if (Window is { } w
-            && !(double.IsFinite(w.Left) && double.IsFinite(w.Top)
-                && double.IsFinite(w.Width) && double.IsFinite(w.Height)
-                && w.Width > 0 && w.Height > 0))
+            && !(Math.Abs(w.Left) <= MaximumWindowOffset && Math.Abs(w.Top) <= MaximumWindowOffset
+                && w.Width > 0 && w.Width <= MaximumWindowSize
+                && w.Height > 0 && w.Height <= MaximumWindowSize))
         {
             Window = null;
         }
@@ -165,6 +171,27 @@ public sealed class SettingsStore
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Renames the file to <c>settings.bad.json</c> after a start failed, so that a saved value that breaks the
+    /// window cannot stop every later start as well: the next start uses the defaults.
+    /// </summary>
+    /// <returns>Where the file went, or null when there was none or it could not be renamed.</returns>
+    public string? TrySetAside()
+    {
+        try
+        {
+            if (!File.Exists(FilePath))
+                return null;
+            string target = Path.ChangeExtension(FilePath, ".bad.json");
+            File.Move(FilePath, target, overwrite: true);
+            return target;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return null;
         }
     }
 }

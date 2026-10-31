@@ -17,6 +17,9 @@ public enum FileLifecycle : byte
 /// <param name="PagingBytesRead">Bytes the cache/memory manager read from the device for this file.</param>
 /// <param name="Processes">Up to three process names, plus "+N more".</param>
 /// <param name="RenamedTo">The new path of the last rename, when Windows reported it.</param>
+/// <param name="ProcessNames">
+/// Every process name stored for the file, for searching; null when <paramref name="Processes"/> already names them all.
+/// </param>
 public readonly record struct FileStatsSnapshot(
     string Path,
     char Drive,
@@ -35,7 +38,8 @@ public readonly record struct FileStatsSnapshot(
     string LastProcess,
     string Processes,
     int ProcessCount,
-    string? RenamedTo = null);
+    string? RenamedTo = null,
+    IReadOnlyList<string>? ProcessNames = null);
 
 public readonly record struct DriveTotals(
     char Drive,

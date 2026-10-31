@@ -60,8 +60,12 @@ public partial class App : Application
         {
             ErrorLog.Write(ex, "startup");
             ShutDownViewModel(save: false);
+
+            // Nothing is saved after a failed start, so a saved value that broke it would break every later start too.
+            string? setAside = _settingsStore?.TrySetAside();
+            string settingsNote = setAside is null ? "" : $"\n\nYour settings were moved to {setAside}; the next start uses the defaults.";
             MessageBox.Show(
-                $"DriveMonitor could not start:\n\n{ex.Message}\n\nDetails were saved to {ErrorLog.FilePath}.",
+                $"DriveMonitor could not start:\n\n{ex.Message}{settingsNote}\n\nDetails were saved to {ErrorLog.FilePath}.",
                 "DriveMonitor", MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown(1);
         }

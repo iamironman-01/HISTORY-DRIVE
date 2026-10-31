@@ -21,12 +21,14 @@ public sealed class ActivityFeed
     private readonly Queue<FileActivityEvent> _pauseBuffer = new();
     private readonly List<ActivityRowViewModel> _added = [];
     private readonly List<ActivityRowViewModel> _dirty = [];
+    private readonly ViewResort _resort;
     private bool _groupRepeated = true;
 
     public ActivityFeed(Predicate<object> filter, int maxRows)
     {
         MaxRows = Math.Max(1, maxRows);
         View = new ListCollectionView(_rows) { Filter = filter };
+        _resort = new ViewResort(View);
     }
 
     /// <summary>Raised before rows are added or removed, so the view can remember its scroll position.</summary>
@@ -42,6 +44,13 @@ public sealed class ActivityFeed
 
     /// <summary>Rows in the list, visible or not.</summary>
     public int TotalRows => _rows.Count;
+
+    /// <summary>Rows selected in the grid; see <see cref="BatchObservableCollection{T}.SelectedCount"/>.</summary>
+    public int SelectedCount
+    {
+        get => _rows.SelectedCount;
+        set => _rows.SelectedCount = value;
+    }
 
     public bool IsPaused { get; private set; }
 
@@ -120,7 +129,17 @@ public sealed class ActivityFeed
     }
 
     /// <summary>Re-applies the filter after a filter setting changed.</summary>
-    public void Refresh() => View.Refresh();
+    public void Refresh()
+    {
+        View.Refresh();
+        _resort.Refreshed();
+    }
+
+    /// <summary>
+    /// Re-sorts a sorted view after grouped rows changed their count or size (see <see cref="ViewResort"/>);
+    /// call about once a second.
+    /// </summary>
+    public void ResortChangedRows() => _resort.Run();
 
     private void Append(IReadOnlyList<FileActivityEvent> events)
     {
@@ -133,7 +152,7 @@ public sealed class ActivityFeed
                 continue;
             }
 
-            var key = new GroupKey(ev.Operation, ev.Path, ev.ProcessId, ev.IsPaging, ev.Status);
+            GroupKey key = GroupKey.Of(ev);
             if (_groupable.TryGetValue(key, out ActivityRowViewModel? row)
                 && !row.IsEvicted
                 && Math.Abs(ev.Timestamp.Ticks - row.LastTime.Ticks) <= GroupWindowTicks)
@@ -157,6 +176,8 @@ public sealed class ActivityFeed
         if (_added.Count > 0)
             Publish();
 
+        if (_dirty.Count > 0)
+            _resort.RowsChanged();
         foreach (ActivityRowViewModel row in _dirty)
         {
             row.IsDirty = false;
@@ -214,7 +235,30 @@ public sealed class ActivityFeed
         operation is FileOperation.Read or FileOperation.Write or FileOperation.Open
             or FileOperation.List or FileOperation.SetInfo or FileOperation.Flush;
 
-    private readonly record struct GroupKey(FileOperation Operation, string Path, int ProcessId, bool IsPaging, IoStatus Status);
+    /// <summary>What two operations must share to be shown as one row.</summary>
+    /// <param name="NtStatus">The exact failure: two failed opens, access denied and a sharing violation, are different.</param>
+    /// <param name="IsSizeChange">An end-of-file change, whose detail holds the new size.</param>
+    /// <param name="Detail">
+    /// Core's detail, which tells apart the kinds of change an operation such as SetInfo covers (timestamps, a hard
+    /// link, a cancelled delete). Null for size changes: each new size differs, yet a row of them shows the latest.
+    /// </param>
+    private readonly record struct GroupKey(
+        FileOperation Operation,
+        string Path,
+        int ProcessId,
+        bool IsPaging,
+        IoStatus Status,
+        int NtStatus,
+        bool IsSizeChange,
+        string? Detail)
+    {
+        public static GroupKey Of(FileActivityEvent ev)
+        {
+            bool sizeChange = (ev.Flags & FileEventFlags.SizeChange) != 0;
+            return new GroupKey(
+                ev.Operation, ev.Path, ev.ProcessId, ev.IsPaging, ev.Status, ev.NtStatus, sizeChange, sizeChange ? null : ev.Detail);
+        }
+    }
 
     /// <summary>Paths compare case-insensitively, as Windows does.</summary>
     private sealed class GroupKeyComparer : IEqualityComparer<GroupKey>
@@ -226,9 +270,14 @@ public sealed class ActivityFeed
             && x.ProcessId == y.ProcessId
             && x.IsPaging == y.IsPaging
             && x.Status == y.Status
+            && x.NtStatus == y.NtStatus
+            && x.IsSizeChange == y.IsSizeChange
+            && string.Equals(x.Detail, y.Detail, StringComparison.Ordinal)
             && string.Equals(x.Path, y.Path, StringComparison.OrdinalIgnoreCase);
 
         public int GetHashCode(GroupKey key) =>
-            HashCode.Combine(key.Operation, key.ProcessId, key.IsPaging, key.Status, StringComparer.OrdinalIgnoreCase.GetHashCode(key.Path));
+            HashCode.Combine(
+                key.Operation, key.ProcessId, key.IsPaging, key.Status, key.NtStatus, key.IsSizeChange, key.Detail,
+                StringComparer.OrdinalIgnoreCase.GetHashCode(key.Path));
     }
 }
