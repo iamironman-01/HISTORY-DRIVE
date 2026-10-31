@@ -3,14 +3,24 @@ using System.Globalization;
 using System.IO.Pipes;
 using System.Text;
 using DriveMonitor.Core.Export;
+using DriveMonitor.Core.Interop;
 using DriveMonitor.Core.Models;
 using DriveMonitor.Tests.TestSupport;
+using Microsoft.Win32.SafeHandles;
 
 namespace DriveMonitor.Tests.Export;
 
 /// <summary>The background CSV log of published events.</summary>
 public sealed class CsvActivityLogTests
 {
+    /// <summary>The links a standard user can plant where the elevated log creates or deletes its parts.</summary>
+    public enum PlantedLink
+    {
+        Junction,
+        HardLink,
+        SymbolicLink,
+    }
+
     private static readonly string HeaderLine = string.Join(",", Csv.EventHeader) + "\r\n";
     private static readonly byte[] Bom = [0xEF, 0xBB, 0xBF];
     private static readonly int HeaderBytes = Bom.Length + Encoding.UTF8.GetByteCount(HeaderLine);
@@ -275,6 +285,165 @@ public sealed class CsvActivityLogTests
         Assert.Equal(HeaderLine, File.ReadAllText(path));
     }
 
+    [Fact]
+    public void Constructor_RefusesALogFolderThatIsAJunction()
+    {
+        using var temp = new TempDirectory();
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        string logs = temp.PathOf("Logs");
+        using IDisposable planted = FileLinks.CreateJunction(logs, victim);
+
+        Assert.Throws<IOException>(() => new CsvActivityLog(Path.Combine(logs, "log.csv")));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+    }
+
+    [Theory]
+    [InlineData(PlantedLink.Junction)]
+    [InlineData(PlantedLink.HardLink)]
+    [InlineData(PlantedLink.SymbolicLink)]
+    public void Constructor_RefusesALinkWithTheFilesName(PlantedLink link)
+    {
+        using var temp = new TempDirectory();
+        string path = Path.Combine(Directory.CreateDirectory(temp.PathOf("Logs")).FullName, "log.csv");
+        using Victim? victim = Victim.TryPlant(link, path, temp.FullPath);
+        if (victim is null)
+            return; // Windows refuses symbolic links without administrator rights or Developer Mode; CI runs elevated.
+
+        IOException error = Assert.Throws<IOException>(() => new CsvActivityLog(path));
+
+        Assert.Contains(path, error.Message);
+        victim.AssertUntouched();
+    }
+
+    [Theory]
+    [InlineData(PlantedLink.Junction)]
+    [InlineData(PlantedLink.HardLink)]
+    [InlineData(PlantedLink.SymbolicLink)]
+    public void Rotation_WhenALinkHasTheNextPartsName_StopsTheLogWithAnError(PlantedLink link)
+    {
+        using var temp = new TempDirectory();
+        string logs = Directory.CreateDirectory(temp.PathOf("Logs")).FullName;
+        string next = Path.Combine(logs, "log.002.csv");
+        using Victim? victim = Victim.TryPlant(link, next, temp.FullPath);
+        if (victim is null)
+            return; // Windows refuses symbolic links without administrator rights or Developer Mode; CI runs elevated.
+        var log = new CsvActivityLog(Path.Combine(logs, "log.csv"), maxFileBytes: HeaderBytes + (3 * RowBytes));
+
+        for (int i = 0; i < 10; i++)
+            log.Write(Event(i));
+        log.Dispose();
+
+        IOException error = Assert.IsType<IOException>(log.Error);
+        Assert.Contains(next, error.Message);
+        Assert.Equal(3L, log.Written); // the first part; the row that starts the next one, and every later row, is dropped
+        Assert.Equal(7L, log.Dropped);
+        Assert.Equal(Path.Combine(logs, "log.csv"), log.CurrentFilePath);
+        Assert.Equal(Enumerable.Range(0, 3).Select(i => Event(i).Path), PathsIn(Path.Combine(logs, "log.csv")));
+        victim.AssertUntouched();
+    }
+
+    [Theory]
+    [InlineData(PlantedLink.Junction)]
+    [InlineData(PlantedLink.HardLink)]
+    [InlineData(PlantedLink.SymbolicLink)]
+    public void Rotation_LeavesALinkThatTookAnOldPartsName_AndGoesOn(PlantedLink link)
+    {
+        using var temp = new TempDirectory();
+        string logs = Directory.CreateDirectory(temp.PathOf("Logs")).FullName;
+        string first = Path.Combine(logs, "log.csv");
+        var log = new CsvActivityLog(first, maxFileBytes: HeaderBytes + (3 * RowBytes), maxFiles: 2);
+        for (int i = 0; i < 4; i++)
+            log.Write(Event(i));
+        Assert.True(SpinWait.SpinUntil(() => log.Written == 4, TimeSpan.FromSeconds(5)), "the second part was not started");
+
+        // The log has closed its first part; someone allowed to delete it puts a link in its place, which
+        // the log would delete before its third part.
+        File.Delete(first);
+        using Victim? victim = Victim.TryPlant(link, first, temp.FullPath);
+        for (int i = 4; i < 10; i++)
+            log.Write(Event(i));
+        log.Dispose();
+        if (victim is null)
+            return; // Windows refuses symbolic links without administrator rights or Developer Mode; CI runs elevated.
+
+        Assert.Null(log.Error);
+        Assert.Equal(10L, log.Written);
+        Assert.True(Path.Exists(first), "the link was deleted");
+        victim.AssertUntouched();
+        string[] kept = [first, Path.Combine(logs, "log.003.csv"), Path.Combine(logs, "log.004.csv")];
+        Assert.Equal(kept.Order(), Directory.EnumerateFileSystemEntries(logs).Order());
+    }
+
+    [Fact]
+    public void Rotation_EmptiesAPlainFileLeftAtAPartsName()
+    {
+        using var temp = new TempDirectory();
+        File.WriteAllText(temp.PathOf("log.002.csv"), "a part of an earlier log, which must disappear\r\n");
+        var log = new CsvActivityLog(temp.PathOf("log.csv"), maxFileBytes: HeaderBytes + (3 * RowBytes));
+
+        for (int i = 0; i < 6; i++)
+            log.Write(Event(i));
+        log.Dispose();
+
+        Assert.Null(log.Error);
+        Assert.Equal(Enumerable.Range(3, 3).Select(i => Event(i).Path), PathsIn(temp.PathOf("log.002.csv")));
+    }
+
+    [Fact]
+    public void TheLogFolder_CannotBeRenamedOrDeletedWhileTheLogRuns()
+    {
+        using var temp = new TempDirectory();
+        string logs = Directory.CreateDirectory(temp.PathOf("Logs")).FullName;
+        var log = new CsvActivityLog(Path.Combine(logs, "log.csv"));
+
+        // Moved away between two parts, the folder could be replaced by a junction that the next part follows.
+        Assert.False(CanOpenForDelete(logs), "the folder can be renamed or deleted while the log runs");
+
+        log.Dispose();
+
+        Assert.True(CanOpenForDelete(logs), "the folder is still held after the log closed");
+    }
+
+    [Fact]
+    public void Constructor_TakesAFolderPathLongerThanMaxPath()
+    {
+        using var temp = new TempDirectory();
+        string logs = temp.FullPath;
+        while (logs.Length <= 300)
+            logs = Path.Combine(logs, "a folder with a long name");
+        var log = new CsvActivityLog(Path.Combine(logs, "log.csv"), maxFileBytes: HeaderBytes + RowBytes, maxFiles: 2);
+
+        for (int i = 0; i < 3; i++)
+            log.Write(Event(i));
+        log.Dispose();
+
+        Assert.Null(log.Error);
+        Assert.Equal(3L, log.Written);
+        string[] kept = [Path.Combine(logs, "log.002.csv"), Path.Combine(logs, "log.003.csv")];
+        Assert.Equal(kept.Order(), Directory.GetFiles(logs).Order());
+    }
+
+    [Fact]
+    public void Constructor_PathOfAFolder_Throws()
+    {
+        using var temp = new TempDirectory();
+
+        IOException error = Assert.Throws<IOException>(() => new CsvActivityLog(temp.FullPath + Path.DirectorySeparatorChar));
+
+        Assert.Contains("is a folder", error.Message);
+    }
+
+    /// <summary>Whether another program could rename or delete the folder now, which takes an open with delete access.</summary>
+    private static bool CanOpenForDelete(string folder)
+    {
+        const uint Delete = 0x0001_0000;
+        const uint ShareAll = 0x7;
+        const uint FileFlagBackupSemantics = 0x0200_0000;
+        using SafeFileHandle handle = NativeMethods.CreateFileW(
+            folder, Delete, ShareAll, IntPtr.Zero, NativeMethods.OPEN_EXISTING, FileFlagBackupSemantics, IntPtr.Zero);
+        return !handle.IsInvalid;
+    }
+
     /// <summary>Reads the file while the log may still hold it open for writing.</summary>
     private static byte[] ReadShared(string path)
     {
@@ -314,6 +483,53 @@ public sealed class CsvActivityLogTests
         ProcessId = 4242,
         ThreadId = 7,
     };
+
+    /// <summary>
+    /// What a link planted at one of the log's names leads to: a folder for a junction, a file for the other
+    /// links, standing for a file only administrators may change. It must stay untouched.
+    /// </summary>
+    private sealed class Victim : IDisposable
+    {
+        private const string Content = "keep me";
+        private readonly string _path;
+        private readonly IDisposable? _junction;
+
+        private Victim(string path, IDisposable? junction)
+        {
+            _path = path;
+            _junction = junction;
+        }
+
+        /// <summary>Creates the victim in <paramref name="folder"/> and plants <paramref name="link"/> to it at <paramref name="linkPath"/>.</summary>
+        /// <returns>Null when Windows refuses the link: a symbolic link needs administrator rights or Developer Mode.</returns>
+        public static Victim? TryPlant(PlantedLink link, string linkPath, string folder)
+        {
+            if (link == PlantedLink.Junction)
+            {
+                string target = Directory.CreateDirectory(Path.Combine(folder, "victim")).FullName;
+                return new Victim(target, FileLinks.CreateJunction(linkPath, target));
+            }
+
+            string file = Path.Combine(folder, "victim.txt");
+            File.WriteAllText(file, Content);
+            if (link == PlantedLink.HardLink)
+                FileLinks.CreateHardLink(linkPath, file);
+            else if (!FileLinks.TryCreateFileSymbolicLink(linkPath, file))
+                return null;
+            return new Victim(file, null);
+        }
+
+        public void AssertUntouched()
+        {
+            if (_junction is null)
+                Assert.Equal(Content, File.ReadAllText(_path));
+            else
+                Assert.Empty(Directory.EnumerateFileSystemEntries(_path));
+        }
+
+        /// <summary>Removes a junction, which the temporary folder's recursive delete could not.</summary>
+        public void Dispose() => _junction?.Dispose();
+    }
 
     /// <summary>
     /// A named pipe the log writes into, standing in for a drive whose speed the test controls. Until

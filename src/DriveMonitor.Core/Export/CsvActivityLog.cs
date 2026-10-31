@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Threading.Channels;
+using DriveMonitor.Core.IO;
 using DriveMonitor.Core.Models;
 
 namespace DriveMonitor.Core.Export;
@@ -17,6 +18,14 @@ namespace DriveMonitor.Core.Export;
 /// at <c>maxFileBytes</c> the log continues in a new file (a "part"), only the newest
 /// <c>maxFiles</c> parts are kept, and the log stops when its drive has less than
 /// <c>minFreeBytes</c> free.
+/// <para>
+/// The log is written as administrator, often into a folder other users can change (a shared
+/// folder, the root of a pendrive) and under names they can predict. A link planted there must not
+/// turn its truncations and deletes against another file, so the folder is opened once with
+/// <see cref="LinkSafeFolder"/>, which refuses a junction or link, and held open so that it cannot be
+/// replaced by one while the log runs. Every part is created and deleted relative to it, and a link,
+/// folder or hard-linked file found at a part's name is refused instead of followed.
+/// </para>
 /// </remarks>
 public sealed class CsvActivityLog : IDisposable
 {
@@ -42,6 +51,9 @@ public sealed class CsvActivityLog : IDisposable
     private readonly string _stem;
     private readonly string _extension;
 
+    /// <summary>The parts' folder, held open from the constructor until the background task ends.</summary>
+    private readonly LinkSafeFolder _folder;
+
     /// <summary>This log's parts that are still on disk, oldest first.</summary>
     private readonly List<string> _parts = [];
     private readonly Task _pump;
@@ -63,7 +75,10 @@ public sealed class CsvActivityLog : IDisposable
     /// <param name="maxFiles">How many parts are kept; starting a new one deletes the oldest. 0 keeps all.</param>
     /// <param name="minFreeBytes">The log stops with an error when less than this is free on its drive; 0 for no check.</param>
     /// <param name="capacity">Events that may wait for the writer before new ones are dropped.</param>
-    /// <exception cref="IOException">The file cannot be created, or its drive already has less than <paramref name="minFreeBytes"/> free.</exception>
+    /// <exception cref="IOException">
+    /// The file cannot be created; it, or its folder, is a junction, symbolic link or other reparse point, or the
+    /// file has other names (hard links); or its drive already has less than <paramref name="minFreeBytes"/> free.
+    /// </exception>
     public CsvActivityLog(string filePath, long maxFileBytes = 0, int maxFiles = 0, long minFreeBytes = 0, int capacity = 100_000)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maxFileBytes);
@@ -71,6 +86,9 @@ public sealed class CsvActivityLog : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(minFreeBytes);
 
         FilePath = Path.GetFullPath(filePath);
+        string? folderPath = Path.GetDirectoryName(FilePath);
+        if (folderPath is null || Path.GetFileName(FilePath).Length == 0)
+            throw new IOException($"'{FilePath}' is a folder, not a file.");
         _extension = Path.GetExtension(FilePath);
         _stem = FilePath[..^_extension.Length];
         _currentFilePath = FilePath;
@@ -80,15 +98,24 @@ public sealed class CsvActivityLog : IDisposable
 
         // Refuse at once rather than start a log that stops at its first write.
         CheckFreeSpace();
-        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-        _file = CreateFile(FilePath);
+        Directory.CreateDirectory(folderPath);
+        _folder = LinkSafeFolder.Open(folderPath);
         try
         {
-            _file.Write(Header);
+            _file = CreateFile(FilePath);
+            try
+            {
+                _file.Write(Header);
+            }
+            catch
+            {
+                _file.Dispose();
+                throw;
+            }
         }
         catch
         {
-            _file.Dispose();
+            _folder.Dispose();
             throw;
         }
 
@@ -187,11 +214,28 @@ public sealed class CsvActivityLog : IDisposable
     }
 
     /// <summary>
-    /// Unbuffered, because the pump writes whole chunks itself; asynchronous, so a write stuck on a
-    /// stalled drive can be cancelled instead of keeping the file and the pump busy indefinitely.
+    /// Creates a part in the log's folder, or empties the plain file already of that name; a link, a folder or
+    /// a file with other names is refused. Unbuffered, because the pump writes whole chunks itself;
+    /// asynchronous, so a write stuck on a stalled drive can be cancelled instead of keeping the file and the
+    /// pump busy indefinitely.
     /// </summary>
-    private static FileStream CreateFile(string path) =>
-        new(path, FileMode.Create, FileAccess.Write, FileShare.Read, bufferSize: 0, FileOptions.Asynchronous);
+    private FileStream CreateFile(string path)
+    {
+        // Emptied only once LinkSafeFolder has checked what the name leads to; a pipe has nothing to empty.
+        FileStream file = _folder.OpenFile(
+            Path.GetFileName(path), FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, options: FileOptions.Asynchronous);
+        try
+        {
+            if (file.CanSeek)
+                file.SetLength(0);
+            return file;
+        }
+        catch
+        {
+            file.Dispose();
+            throw;
+        }
+    }
 
     private static long? AvailableFreeSpace(string path)
     {
@@ -252,6 +296,7 @@ public sealed class CsvActivityLog : IDisposable
             Interlocked.Add(ref _dropped, _bufferedRows);
             DropQueued();
             CloseFile();
+            _folder.Dispose();
             _row.Dispose();
 
             // Last, so a caller that sees the error also sees the final counts.
@@ -320,13 +365,14 @@ public sealed class CsvActivityLog : IDisposable
             return;
 
         // A part that another program holds open without delete sharing (a spreadsheet, say) cannot be
-        // deleted now; it stays listed and is tried again before the next part. Newer parts are kept.
+        // deleted now; it stays listed and is tried again before the next part. So does a name that a
+        // link, a folder or a hard-linked file has taken over, which is never deleted. Newer parts are kept.
         int excess = _parts.Count - (_maxFiles - 1);
         for (int i = excess - 1; i >= 0; i--)
         {
             try
             {
-                File.Delete(_parts[i]);
+                _folder.DeleteFile(Path.GetFileName(_parts[i]));
                 _parts.RemoveAt(i);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
