@@ -806,6 +806,92 @@ public sealed class ActivityAggregatorTests
             processes.Select(p => (p.ProcessId, p.ProcessName, p.Reads)));
     }
 
+    // ---- events delivered out of time order ----
+
+    [Fact]
+    public void LateEvent_DoesNotMoveTheFirstAndLastValuesBackwards()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Write, FileA, bytes: 10, processId: 1, processName: "writer.exe", second: 9));
+        aggregator.Record(Ev(FileOperation.Read, FileA, bytes: 5, processId: 2, processName: "reader.exe", second: 4)); // logged earlier on another processor
+
+        FileStatsSnapshot file = FileStats(aggregator, FileA);
+        Assert.Equal(T0.AddSeconds(4), file.FirstSeen);
+        Assert.Equal(T0.AddSeconds(9), file.LastSeen);
+        Assert.Equal(FileOperation.Write, file.LastOperation);
+        Assert.Equal("writer.exe", file.LastProcess);
+        Assert.Equal(1L, file.Reads);
+        Assert.Equal("writer.exe, reader.exe", file.Processes);
+
+        Assert.Equal(T0.AddSeconds(9), Assert.Single(aggregator.GetDriveTotals()).LastActivity);
+    }
+
+    [Fact]
+    public void LateEvent_ExtendsTheProcessFirstSeenWithoutMovingItsLastSeen()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Read, FileA, second: 5));
+        aggregator.Record(Ev(FileOperation.Read, FileB, second: 2));
+        aggregator.Record(Ev(FileOperation.Read, FileA, second: 3));
+
+        ProcessStatsSnapshot process = Assert.Single(aggregator.GetAllProcesses());
+        Assert.Equal(T0.AddSeconds(2), process.FirstSeen);
+        Assert.Equal(T0.AddSeconds(5), process.LastSeen);
+    }
+
+    [Fact]
+    public void LateApplicationEvent_AfterNewerPagingIo_StillNamesTheLastProcess()
+    {
+        var aggregator = new ActivityAggregator();
+
+        // The lazy writer's flush was delivered before the write it flushes.
+        aggregator.Record(Ev(FileOperation.Write, FileA, bytes: 4096, flags: FileEventFlags.Paging, processId: 4, processName: "System", second: 2));
+        aggregator.Record(Ev(FileOperation.Write, FileA, bytes: 100, processName: "notepad.exe", second: 1));
+
+        FileStatsSnapshot file = FileStats(aggregator, FileA);
+        Assert.Equal("notepad.exe", file.LastProcess);
+        Assert.Equal(T0.AddSeconds(1), file.FirstSeen);
+        Assert.Equal(T0.AddSeconds(2), file.LastSeen);
+    }
+
+    [Fact]
+    public void LateCreate_DoesNotUndoANewerDelete()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Delete, FileA, second: 2));
+        aggregator.Record(Ev(FileOperation.Create, FileA, second: 1));
+
+        Assert.Equal(FileLifecycle.Created | FileLifecycle.Deleted, FileStats(aggregator, FileA).Lifecycle);
+    }
+
+    [Fact]
+    public void LateDelete_DoesNotUndoANewerCancel()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.SetInfo, FileA, flags: FileEventFlags.DeleteCancelled, second: 2));
+        aggregator.Record(Ev(FileOperation.Delete, FileA, second: 1));
+
+        Assert.Equal(FileLifecycle.None, FileStats(aggregator, FileA).Lifecycle);
+    }
+
+    [Fact]
+    public void LateRename_DoesNotReplaceTheNewerTarget()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Rename, FileA, target: @"E:\docs\c.txt", second: 5));
+        aggregator.Record(Ev(FileOperation.Rename, FileA, target: @"E:\docs\b.txt", second: 3));
+        aggregator.Record(Ev(FileOperation.Rename, FileA, second: 6)); // the new name was not reported
+
+        FileStatsSnapshot file = FileStats(aggregator, FileA);
+        Assert.Equal(@"E:\docs\c.txt", file.RenamedTo);
+        Assert.Equal(FileLifecycle.Renamed, file.Lifecycle);
+    }
+
     // ---- files and drives ----
 
     [Fact]
@@ -872,10 +958,12 @@ public sealed class ActivityAggregatorTests
         IoStatus status = IoStatus.Success,
         int processId = 100,
         string processName = "app.exe",
-        int second = 0) => new()
+        int second = 0,
+        string? target = null) => new()
     {
         Operation = operation,
         Path = path,
+        TargetPath = target,
         Drive = char.ToUpperInvariant(path[0]),
         Bytes = bytes,
         Flags = flags,

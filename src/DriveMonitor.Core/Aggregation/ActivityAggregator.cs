@@ -11,6 +11,11 @@ namespace DriveMonitor.Core.Aggregation;
 /// Paging I/O (lazy writer, read-ahead, memory-mapped files) repeats bytes an application
 /// already moved through the cache, so it goes into separate "paging" totals and is not
 /// attributed to processes. Failed operations are counted but change no totals.
+/// <para>
+/// Events arrive roughly, not strictly, in time order: the kernel delivers each processor's buffer
+/// on its own, up to a flush interval apart. First and last values, and whether a file is deleted,
+/// therefore follow the event timestamps rather than the order of arrival.
+/// </para>
 /// </remarks>
 public sealed class ActivityAggregator
 {
@@ -65,7 +70,8 @@ public sealed class ActivityAggregator
         {
             DriveEntry drive = GetDrive(ev.Drive);
             drive.Events++;
-            drive.LastActivity = ev.Timestamp;
+            if (ev.Timestamp > drive.LastActivity)
+                drive.LastActivity = ev.Timestamp;
 
             FileEntry? file = GetOrAddFile(ev);
             ProcessEntry? process = ev.IsPaging ? null : GetProcess(ev);
@@ -124,9 +130,9 @@ public sealed class ActivityAggregator
                         process.Creates++;
                     if (file is not null)
                     {
-                        file.Lifecycle = (file.Lifecycle | FileLifecycle.Created) & ~FileLifecycle.Deleted;
-                        if ((ev.Flags & FileEventFlags.DeleteOnClose) != 0)
-                            file.Lifecycle |= FileLifecycle.Deleted;
+                        // A new file replaces a deleted one, unless it is itself deleted when closed.
+                        file.Lifecycle |= FileLifecycle.Created;
+                        file.SetDeleted((ev.Flags & FileEventFlags.DeleteOnClose) != 0, ev.Timestamp);
                     }
 
                     break;
@@ -136,7 +142,7 @@ public sealed class ActivityAggregator
                     {
                         file.Opens++;
                         if ((ev.Flags & FileEventFlags.DeleteOnClose) != 0)
-                            file.Lifecycle |= FileLifecycle.Deleted;
+                            file.SetDeleted(true, ev.Timestamp);
                     }
 
                     break;
@@ -146,7 +152,7 @@ public sealed class ActivityAggregator
                     if (process is not null)
                         process.Deletes++;
                     if (file is not null)
-                        file.Lifecycle |= FileLifecycle.Deleted;
+                        file.SetDeleted(true, ev.Timestamp);
                     break;
 
                 case FileOperation.Rename:
@@ -154,12 +160,7 @@ public sealed class ActivityAggregator
                     if (process is not null)
                         process.Renames++;
                     if (file is not null)
-                    {
-                        file.Lifecycle |= FileLifecycle.Renamed;
-                        if (ev.TargetPath is not null)
-                            file.RenamedTo = ev.TargetPath;
-                    }
-
+                        file.Renamed(ev.TargetPath, ev.Timestamp);
                     break;
 
                 case FileOperation.SetInfo when file is not null && (ev.Flags & FileEventFlags.SizeChange) != 0:
@@ -169,26 +170,21 @@ public sealed class ActivityAggregator
                 // The file is kept after all. This follows the usual single handle: another handle opened with
                 // delete-on-close would still delete it.
                 case FileOperation.SetInfo when file is not null && (ev.Flags & FileEventFlags.DeleteCancelled) != 0:
-                    file.Lifecycle &= ~FileLifecycle.Deleted;
+                    file.SetDeleted(false, ev.Timestamp);
                     break;
             }
 
             if (file is not null)
             {
-                file.LastSeen = ev.Timestamp;
-                file.LastOperation = ev.Operation;
+                file.Seen(ev);
                 if (!ev.IsPaging)
-                {
-                    file.LastProcess = ev.ProcessName;
                     file.AddProcess(ev.ProcessName);
-                }
-
                 _changedFiles.Add(file);
             }
 
             if (process is not null)
             {
-                process.LastSeen = ev.Timestamp;
+                process.Seen(ev.Timestamp);
                 if (file is not null)
                     process.Files.Add(file);
                 _changedProcesses.Add(process);
@@ -388,7 +384,13 @@ public sealed class ActivityAggregator
 
     private sealed class FileEntry(string path, char drive, bool isDirectory, DateTime firstSeen)
     {
-        private readonly DateTime _firstSeen = firstSeen;
+        private DateTime _firstSeen = firstSeen;
+
+        // Timestamps of the events that last set LastProcess, RenamedTo and the Deleted flag, so that an
+        // event delivered late cannot overwrite what a newer one set.
+        private DateTime _lastProcessAt;
+        private DateTime _renamedAt;
+        private DateTime _deletedAt;
         private List<string>? _processNames;
 
         // Names beyond the first MaxNamesPerFile: only counted, so a set keeps repeats from inflating the count.
@@ -414,6 +416,47 @@ public sealed class ActivityAggregator
         public string? RenamedTo;
 
         private int ProcessCount => (_processNames?.Count ?? 0) + (_extraNames?.Count ?? 0);
+
+        /// <summary>Updates the first and last values; of two events with the same timestamp, the one recorded last wins.</summary>
+        public void Seen(FileActivityEvent ev)
+        {
+            if (ev.Timestamp < _firstSeen)
+                _firstSeen = ev.Timestamp;
+
+            if (ev.Timestamp >= LastSeen)
+            {
+                LastSeen = ev.Timestamp;
+                LastOperation = ev.Operation;
+            }
+
+            // Ordered on its own: paging I/O names no process, and a newer paging event must not stop an older
+            // application event, delivered after it, from naming its process.
+            if (!ev.IsPaging && ev.Timestamp >= _lastProcessAt)
+            {
+                _lastProcessAt = ev.Timestamp;
+                LastProcess = ev.ProcessName;
+            }
+        }
+
+        /// <summary>Sets or clears Deleted, unless a later delete, cancel or create has already decided it.</summary>
+        public void SetDeleted(bool deleted, DateTime at)
+        {
+            if (at < _deletedAt)
+                return;
+
+            _deletedAt = at;
+            Lifecycle = deleted ? Lifecycle | FileLifecycle.Deleted : Lifecycle & ~FileLifecycle.Deleted;
+        }
+
+        public void Renamed(string? target, DateTime at)
+        {
+            Lifecycle |= FileLifecycle.Renamed;
+            if (target is not null && at >= _renamedAt)
+            {
+                _renamedAt = at;
+                RenamedTo = target;
+            }
+        }
 
         public void AddProcess(string name)
         {
@@ -466,7 +509,7 @@ public sealed class ActivityAggregator
 
     private sealed class ProcessEntry(int processId, string name, DateTime firstSeen)
     {
-        private readonly DateTime _firstSeen = firstSeen;
+        private DateTime _firstSeen = firstSeen;
         public readonly HashSet<FileEntry> Files = new(ReferenceEqualityComparer.Instance);
         public long Reads;
         public long Writes;
@@ -476,6 +519,14 @@ public sealed class ActivityAggregator
         public long Deletes;
         public long Renames;
         public DateTime LastSeen = firstSeen;
+
+        public void Seen(DateTime at)
+        {
+            if (at < _firstSeen)
+                _firstSeen = at;
+            if (at > LastSeen)
+                LastSeen = at;
+        }
 
         public ProcessStatsSnapshot Snapshot() => new(
             processId, name, Reads, Writes, BytesRead, BytesWritten, Creates, Deletes, Renames, Files.Count, _firstSeen, LastSeen);
