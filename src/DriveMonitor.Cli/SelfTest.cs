@@ -201,6 +201,11 @@ internal static class SelfTest
             }
 
             say($"Session started in {startClock.ElapsedMilliseconds} ms; waiting for it to settle...");
+
+            // Start went ahead despite something the user should know, such as a session guard another program holds.
+            if (engine.StartWarning is { } warning)
+                Console.Error.WriteLine(ConsoleText.Clean(warning));
+
             if (interruptions.Wait(TimeSpan.FromSeconds(2)))
                 return false;
 

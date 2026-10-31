@@ -89,6 +89,10 @@ internal static class LiveMonitor
             return 1;
         }
 
+        // Start went ahead despite something the user should know, such as a session guard another program holds.
+        if (engine.StartWarning is { } warning)
+            Console.Error.WriteLine(ConsoleText.Clean(warning));
+
         string letters = string.Join(", ", selected.Select(d => d + ":"));
         if (watcher is null)
             Console.WriteLine($"Monitoring {letters} - press Ctrl+C to stop.");
