@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace DriveMonitor.Core.Tracing;
 
 /// <summary>
@@ -10,54 +12,90 @@ namespace DriveMonitor.Core.Tracing;
 /// A real-time ETW session delivers per-CPU buffers independently, so a completion logged on
 /// one CPU can arrive before the initiation logged on another. Request addresses are also
 /// recycled within microseconds, so a completion can belong to an older or newer use of the same
-/// address. The rule that resolves both: a completion C belongs to initiation B on the same
-/// address only if C was logged at or after B, and among the candidates the closest one wins.
+/// address. The rule that resolves both: an address serves one operation at a time, so a completion
+/// C belongs to initiation B on the same address only if C was logged at or after B and no other
+/// operation started there in between; among the candidates the closest one wins.
 /// Completions and paths that match nothing yet are kept for a short while in case their
 /// initiation is still in flight; that store also holds completions of operations on
 /// unmonitored drives, which simply expire.
 /// </para>
-/// <para>Not thread-safe; the caller serialises access.</para>
+/// <para>
+/// The rule needs every start on an address, including those of operations this class does not
+/// follow (other drives, excluded processes, kinds DriveMonitor does not report), so the caller
+/// reports them through <see cref="ForeignBegin"/>; the latest start per address is remembered in a
+/// bounded table. A start delivered after a completion that it would have ruled out comes too late
+/// to help, so that mismatch remains possible.
+/// </para>
+/// <para>
+/// Every completion in the system passes through here, and recycling puts thousands of them on a
+/// few hot addresses, so nothing walks a whole per-address chain. Each address's waiting operations
+/// and stored values are doubly linked and sorted by timestamp: one leaves in constant time, a lookup
+/// stops at the first entry that is early enough, and an insert rarely walks because events nearly
+/// always arrive in timestamp order. A cap per address bounds the stored values that arrive out of order.
+/// </para>
+/// <para>Not thread-safe; the caller serialises access. Only <see cref="PendingCount"/> may be read from any thread.</para>
 /// </remarks>
 internal sealed class IoCorrelator
 {
-    private readonly Dictionary<ulong, PendingIo> _pendingByIrp = new();
-    private readonly Dictionary<ulong, PendingIo> _awaitingPathByIrp = new();
+    private readonly Chains _pending = new(awaitingPath: false);
+    private readonly Chains _awaitingPath = new(awaitingPath: true);
     private readonly Queue<PendingIo> _order = new();
     private readonly EarlyStore<(ulong Info, int Status)> _earlyCompletions;
     private readonly EarlyStore<string> _earlyPaths;
+    private readonly StartLog _starts;
     private readonly int _holdMs;
     private readonly int _maxPending;
+    private int _pendingCount;
 
     /// <param name="holdMs">How long an operation may wait for its completion or path before it is released without it.</param>
     /// <param name="earlyKeepMs">How long an unmatched completion or path is kept for a late initiation.</param>
     /// <param name="maxPending">Hard cap on waiting operations; beyond it the oldest are released.</param>
     /// <param name="maxEarly">Hard cap on unmatched completions (and, separately, paths) kept.</param>
-    public IoCorrelator(int holdMs = 2000, int earlyKeepMs = 2000, int maxPending = 200_000, int maxEarly = 500_000)
+    /// <param name="maxEarlyPerIrp">Cap on unmatched completions (and, separately, paths) kept for one request address; beyond it the earliest logged are dropped.</param>
+    /// <param name="maxStartAddresses">Request addresses whose latest start is remembered; up to twice as many are kept while the table turns over.</param>
+    public IoCorrelator(
+        int holdMs = 2000, int earlyKeepMs = 2000, int maxPending = 200_000, int maxEarly = 500_000, int maxEarlyPerIrp = 1024,
+        int maxStartAddresses = 65_536)
     {
         _holdMs = holdMs;
         _maxPending = maxPending;
-        _earlyCompletions = new EarlyStore<(ulong, int)>(earlyKeepMs, maxEarly);
-        _earlyPaths = new EarlyStore<string>(earlyKeepMs, maxEarly);
+        _earlyCompletions = new EarlyStore<(ulong, int)>(earlyKeepMs, maxEarly, maxEarlyPerIrp);
+        _earlyPaths = new EarlyStore<string>(earlyKeepMs, maxEarly, maxEarlyPerIrp);
+        _starts = new StartLog(maxStartAddresses);
     }
 
-    public int PendingCount => _order.Count;
+    /// <summary>Operations not released yet. Unlike the rest of this class, safe to read from any thread.</summary>
+    public int PendingCount => Volatile.Read(ref _pendingCount);
 
     public int EarlyCompletionCount => _earlyCompletions.Count;
 
     public int EarlyPathCount => _earlyPaths.Count;
 
+    /// <summary>Request addresses whose latest start is remembered.</summary>
+    public int StartAddressCount => _starts.Count;
+
     public void Begin(PendingIo io, long nowTick)
     {
         io.ReceivedTick = nowTick;
         io.NextSameIrp = null;
+        io.PrevSameIrp = null;
         io.NextAwaitingPath = null;
+        io.PrevAwaitingPath = null;
+        io.ReusedQpc = long.MaxValue;
         if (io.Irp == 0)
         {
             io.AwaitingPath = false; // nothing could ever be matched to it
         }
         else
         {
-            if (_earlyCompletions.TryTake(io.Irp, io.TimestampQpc, out (ulong Info, int Status) completion))
+            // A start on this address logged after this one but delivered first (per-CPU buffers arrive
+            // out of order) is a time by which this operation's own completion and path were logged.
+            long latestStart = _starts.Latest(io.Irp);
+            io.ReusedQpc = NoteStart(io.Irp, io.TimestampQpc);
+            if (latestStart > io.TimestampQpc && latestStart < io.ReusedQpc)
+                io.ReusedQpc = latestStart;
+
+            if (_earlyCompletions.TryTake(io.Irp, io.TimestampQpc, io.ReusedQpc, out (ulong Info, int Status) completion))
             {
                 io.Completed = true;
                 io.NtStatus = completion.Status;
@@ -65,28 +103,35 @@ internal sealed class IoCorrelator
             }
             else
             {
-                if (_pendingByIrp.TryGetValue(io.Irp, out PendingIo? head))
-                    io.NextSameIrp = head;
-                _pendingByIrp[io.Irp] = io;
+                _pending.Insert(io);
             }
 
             if (io.AwaitingPath)
             {
-                if (_earlyPaths.TryTake(io.Irp, io.TimestampQpc, out string? path))
+                if (_earlyPaths.TryTake(io.Irp, io.TimestampQpc, io.ReusedQpc, out string? path))
                 {
                     io.TargetPath = path;
                     io.AwaitingPath = false;
                 }
                 else
                 {
-                    if (_awaitingPathByIrp.TryGetValue(io.Irp, out PendingIo? head))
-                        io.NextAwaitingPath = head;
-                    _awaitingPathByIrp[io.Irp] = io;
+                    _awaitingPath.Insert(io);
                 }
             }
         }
 
         _order.Enqueue(io);
+        Volatile.Write(ref _pendingCount, _order.Count);
+    }
+
+    /// <summary>
+    /// Records the start of an operation that is not followed (it was filtered out, or is of a kind
+    /// that is not reported): from <paramref name="timestampQpc"/> on, the request address is its.
+    /// </summary>
+    public void ForeignBegin(ulong irp, long timestampQpc)
+    {
+        if (irp != 0)
+            NoteStart(irp, timestampQpc);
     }
 
     /// <returns>True when the completion matched a waiting operation.</returns>
@@ -95,17 +140,13 @@ internal sealed class IoCorrelator
         if (irp == 0)
             return false;
 
-        if (_pendingByIrp.TryGetValue(irp, out PendingIo? head))
+        if (_pending.LatestStartedBy(irp, timestampQpc) is { } owner && BeforeReuse(timestampQpc, owner.ReusedQpc))
         {
-            PendingIo? best = LatestStartedBy(head, timestampQpc, static p => p.NextSameIrp);
-            if (best is not null)
-            {
-                best.Completed = true;
-                best.NtStatus = status;
-                best.CompletionInfo = info;
-                UnlinkPending(irp, best);
-                return true;
-            }
+            owner.Completed = true;
+            owner.NtStatus = status;
+            owner.CompletionInfo = info;
+            _pending.Unlink(owner);
+            return true;
         }
 
         _earlyCompletions.Add(irp, timestampQpc, (info, status), nowTick);
@@ -119,24 +160,19 @@ internal sealed class IoCorrelator
         if (irp == 0)
             return false;
 
-        if (_awaitingPathByIrp.TryGetValue(irp, out PendingIo? head))
+        if (_awaitingPath.LatestStartedBy(irp, timestampQpc) is { } owner && BeforeReuse(timestampQpc, owner.ReusedQpc))
         {
-            PendingIo? best = LatestStartedBy(head, timestampQpc, static p => p.NextAwaitingPath);
-            if (best is not null)
-            {
-                best.TargetPath = path;
-                best.AwaitingPath = false;
-                UnlinkAwaiting(irp, best);
-                return true;
-            }
+            owner.TargetPath = path;
+            owner.AwaitingPath = false;
+            _awaitingPath.Unlink(owner);
+            return true;
         }
 
         // An operation that was not told to wait (it began before the first path event of the
         // session) can still take the path while it waits for its completion.
-        if (_pendingByIrp.TryGetValue(irp, out PendingIo? pending)
-            && LatestStartedBy(pending, timestampQpc, static p => p.NextSameIrp) is { } owner)
+        if (_pending.LatestStartedBy(irp, timestampQpc) is { } pending && BeforeReuse(timestampQpc, pending.ReusedQpc))
         {
-            owner.TargetPath = path;
+            pending.TargetPath = path;
             return true;
         }
 
@@ -159,185 +195,314 @@ internal sealed class IoCorrelator
                 break;
 
             _order.Dequeue();
+            Volatile.Write(ref _pendingCount, _order.Count);
             if (!head.Completed && head.Irp != 0)
-                UnlinkPending(head.Irp, head);
+                _pending.Unlink(head);
             if (head.AwaitingPath)
             {
-                UnlinkAwaiting(head.Irp, head);
+                _awaitingPath.Unlink(head);
                 head.AwaitingPath = false;
             }
 
-            head.NextSameIrp = null;
-            head.NextAwaitingPath = null;
             sink(head);
         }
 
         _earlyCompletions.Purge(nowTick, flushAll);
         _earlyPaths.Purge(nowTick, flushAll);
+        if (flushAll)
+            _starts.Clear();
     }
 
-    /// <summary>The latest operation in a chain that started at or before <paramref name="timestampQpc"/>.</summary>
-    private static PendingIo? LatestStartedBy(PendingIo head, long timestampQpc, Func<PendingIo, PendingIo?> next)
-    {
-        PendingIo? best = null;
-        for (PendingIo? p = head; p is not null; p = next(p))
-        {
-            if (p.TimestampQpc <= timestampQpc && (best is null || p.TimestampQpc > best.TimestampQpc))
-                best = p;
-        }
+    /// <summary>
+    /// Whether an event logged at <paramref name="timestampQpc"/> came before <paramref name="reusedQpc"/>, the
+    /// next start on the address (<see cref="long.MaxValue"/> while none is known), and so can still be that operation's.
+    /// </summary>
+    private static bool BeforeReuse(long timestampQpc, long reusedQpc) =>
+        timestampQpc < reusedQpc || reusedQpc == long.MaxValue;
 
-        return best;
+    /// <summary>
+    /// Records a start on <paramref name="irp"/>: the operations waiting there that started before it
+    /// cannot own a completion or path logged from then on.
+    /// </summary>
+    /// <returns>The earliest start of a waiting operation on the address after this one, or <see cref="long.MaxValue"/>.</returns>
+    private long NoteStart(ulong irp, long timestampQpc)
+    {
+        _starts.Note(irp, timestampQpc);
+        return Math.Min(_pending.NoteStart(irp, timestampQpc), _awaitingPath.NoteStart(irp, timestampQpc));
     }
 
-    private void UnlinkPending(ulong irp, PendingIo item)
+    /// <summary>
+    /// Waiting operations by request address. Each address's operations form a doubly linked chain
+    /// sorted by start, latest first.
+    /// </summary>
+    /// <param name="awaitingPath">Which pair of links in <see cref="PendingIo"/> this chain uses.</param>
+    private sealed class Chains(bool awaitingPath)
     {
-        if (!_pendingByIrp.TryGetValue(irp, out PendingIo? head))
-            return;
+        private readonly Dictionary<ulong, PendingIo> _latestByIrp = new();
 
-        if (ReferenceEquals(head, item))
+        public void Insert(PendingIo io)
         {
-            if (item.NextSameIrp is null)
-                _pendingByIrp.Remove(irp);
-            else
-                _pendingByIrp[irp] = item.NextSameIrp;
-            item.NextSameIrp = null;
-            return;
-        }
-
-        PendingIo previous = head;
-        while (previous.NextSameIrp is { } next)
-        {
-            if (ReferenceEquals(next, item))
+            // Initiations nearly always arrive in start order, so this walk rarely moves.
+            PendingIo? later = null;
+            PendingIo? earlier = _latestByIrp.GetValueOrDefault(io.Irp);
+            while (earlier is not null && earlier.TimestampQpc > io.TimestampQpc)
             {
-                previous.NextSameIrp = item.NextSameIrp;
-                item.NextSameIrp = null;
-                return;
+                later = earlier;
+                earlier = Earlier(earlier);
             }
 
-            previous = next;
-        }
-    }
-
-    private void UnlinkAwaiting(ulong irp, PendingIo item)
-    {
-        if (!_awaitingPathByIrp.TryGetValue(irp, out PendingIo? head))
-            return;
-
-        if (ReferenceEquals(head, item))
-        {
-            if (item.NextAwaitingPath is null)
-                _awaitingPathByIrp.Remove(irp);
+            Earlier(io) = earlier;
+            Later(io) = later;
+            if (earlier is not null)
+                Later(earlier) = io;
+            if (later is not null)
+                Earlier(later) = io;
             else
-                _awaitingPathByIrp[irp] = item.NextAwaitingPath;
-            item.NextAwaitingPath = null;
-            return;
+                _latestByIrp[io.Irp] = io;
         }
 
-        PendingIo previous = head;
-        while (previous.NextAwaitingPath is { } next)
+        /// <summary>Takes <paramref name="io"/> out of its chain in constant time; does nothing if it is not in one.</summary>
+        public void Unlink(PendingIo io)
         {
-            if (ReferenceEquals(next, item))
-            {
-                previous.NextAwaitingPath = item.NextAwaitingPath;
-                item.NextAwaitingPath = null;
+            PendingIo? earlier = Earlier(io);
+            PendingIo? later = Later(io);
+            if (later is not null)
+                Earlier(later) = earlier;
+            else if (!_latestByIrp.TryGetValue(io.Irp, out PendingIo? latest) || !ReferenceEquals(latest, io))
                 return;
+            else if (earlier is null)
+                _latestByIrp.Remove(io.Irp);
+            else
+                _latestByIrp[io.Irp] = earlier;
+
+            if (earlier is not null)
+                Later(earlier) = later;
+            Earlier(io) = null;
+            Later(io) = null;
+        }
+
+        /// <summary>The latest operation on <paramref name="irp"/> that started at or before <paramref name="timestampQpc"/>.</summary>
+        public PendingIo? LatestStartedBy(ulong irp, long timestampQpc)
+        {
+            PendingIo? io = _latestByIrp.GetValueOrDefault(irp);
+            while (io is not null && io.TimestampQpc > timestampQpc)
+                io = Earlier(io);
+            return io;
+        }
+
+        /// <summary>
+        /// Another operation started on <paramref name="irp"/> at <paramref name="timestampQpc"/>. Only the
+        /// latest operation here that started before it needs to know: each earlier one is already limited
+        /// by the start of the one after it.
+        /// </summary>
+        /// <returns>The start of the earliest operation here that began after <paramref name="timestampQpc"/>, or <see cref="long.MaxValue"/>.</returns>
+        public long NoteStart(ulong irp, long timestampQpc)
+        {
+            long nextStart = long.MaxValue;
+            PendingIo? io = _latestByIrp.GetValueOrDefault(irp);
+            for (; io is not null && io.TimestampQpc >= timestampQpc; io = Earlier(io))
+            {
+                if (io.TimestampQpc > timestampQpc)
+                    nextStart = io.TimestampQpc;
             }
 
-            previous = next;
+            if (io is not null && timestampQpc < io.ReusedQpc)
+                io.ReusedQpc = timestampQpc;
+            return nextStart;
         }
+
+        private ref PendingIo? Earlier(PendingIo io) => ref awaitingPath ? ref io.NextAwaitingPath : ref io.NextSameIrp;
+
+        private ref PendingIo? Later(PendingIo io) => ref awaitingPath ? ref io.PrevAwaitingPath : ref io.PrevSameIrp;
     }
 
     /// <summary>Values that arrived before the initiation they belong to, keyed by request address.</summary>
-    private sealed class EarlyStore<T>(int keepMs, int capacity)
+    /// <remarks>
+    /// Each value is on two doubly linked lists, so it leaves either in constant time: its address's
+    /// chain, sorted by timestamp, which a lookup walks from the latest end only as far as the begin;
+    /// and the list of all values in arrival order, which expiry and the overall cap work through.
+    /// </remarks>
+    private sealed class EarlyStore<T>(int keepMs, int capacity, int capacityPerIrp)
     {
-        private readonly Dictionary<ulong, Entry> _byIrp = new();
-        private readonly Queue<Entry> _order = new();
+        private readonly Dictionary<ulong, Chain> _byIrp = new();
+        private Entry? _firstArrived;
+        private Entry? _lastArrived;
 
-        private sealed class Entry
+        /// <summary>One address's values, from the earliest logged to the latest.</summary>
+        private struct Chain
         {
-            public ulong Irp;
-            public long TimestampQpc;
-            public T Value = default!;
-            public long ReceivedTick;
-            public bool Consumed;
-            public Entry? Next;
+            public Entry Earliest;
+            public Entry Latest;
+            public int Count;
         }
 
-        public int Count => _order.Count;
+        private sealed class Entry(ulong irp, long timestampQpc, T value, long receivedTick)
+        {
+            public readonly ulong Irp = irp;
+            public readonly long TimestampQpc = timestampQpc;
+            public readonly T Value = value;
+            public readonly long ReceivedTick = receivedTick;
+            public Entry? Earlier;
+            public Entry? Later;
+            public Entry? ArrivedBefore;
+            public Entry? ArrivedAfter;
+        }
+
+        public int Count { get; private set; }
 
         public void Add(ulong irp, long timestampQpc, T value, long nowTick)
         {
-            var entry = new Entry { Irp = irp, TimestampQpc = timestampQpc, Value = value, ReceivedTick = nowTick };
-            if (_byIrp.TryGetValue(irp, out Entry? head))
-                entry.Next = head;
-            _byIrp[irp] = entry;
-            _order.Enqueue(entry);
-
-            if (_order.Count > capacity)
-                Purge(nowTick, flushAll: false, force: _order.Count - capacity);
-        }
-
-        /// <summary>Takes the earliest unconsumed value for <paramref name="irp"/> logged at or after <paramref name="beginQpc"/>.</summary>
-        public bool TryTake(ulong irp, long beginQpc, out T value)
-        {
-            value = default!;
-            if (!_byIrp.TryGetValue(irp, out Entry? head))
-                return false;
-
-            Entry? best = null;
-            for (Entry? e = head; e is not null; e = e.Next)
+            var entry = new Entry(irp, timestampQpc, value, nowTick);
+            ref Chain chain = ref CollectionsMarshal.GetValueRefOrAddDefault(_byIrp, irp, out bool exists);
+            if (!exists)
             {
-                if (!e.Consumed && e.TimestampQpc >= beginQpc && (best is null || e.TimestampQpc < best.TimestampQpc))
-                    best = e;
+                chain.Earliest = entry;
+                chain.Latest = entry;
+            }
+            else if (timestampQpc < chain.Earliest.TimestampQpc)
+            {
+                entry.Later = chain.Earliest;
+                chain.Earliest.Earlier = entry;
+                chain.Earliest = entry;
+            }
+            else
+            {
+                // Values nearly always arrive in timestamp order, so this walk from the latest rarely moves.
+                Entry earlier = chain.Latest;
+                while (earlier.TimestampQpc > timestampQpc)
+                    earlier = earlier.Earlier!;
+
+                entry.Earlier = earlier;
+                entry.Later = earlier.Later;
+                earlier.Later = entry;
+                if (entry.Later is null)
+                    chain.Latest = entry;
+                else
+                    entry.Later.Earlier = entry;
             }
 
-            if (best is null)
+            Entry? dropped = ++chain.Count > capacityPerIrp ? chain.Earliest : null;
+
+            entry.ArrivedBefore = _lastArrived;
+            if (_lastArrived is null)
+                _firstArrived = entry;
+            else
+                _lastArrived.ArrivedAfter = entry;
+            _lastArrived = entry;
+            Count++;
+
+            // Last, because removing can change the dictionary, which invalidates 'chain'.
+            if (dropped is not null)
+                Remove(dropped);
+            if (Count > capacity)
+                Remove(_firstArrived!);
+        }
+
+        /// <summary>
+        /// Takes the earliest value for <paramref name="irp"/> logged at or after <paramref name="beginQpc"/>,
+        /// unless it was logged at or after <paramref name="reusedQpc"/> and so belongs to a later use of the address.
+        /// </summary>
+        public bool TryTake(ulong irp, long beginQpc, long reusedQpc, out T value)
+        {
+            value = default!;
+            if (!_byIrp.TryGetValue(irp, out Chain chain))
+                return false;
+
+            // Only the values logged since the begin are visited.
+            Entry? best = null;
+            for (Entry? e = chain.Latest; e is not null && e.TimestampQpc >= beginQpc; e = e.Earlier)
+                best = e;
+
+            if (best is null || !BeforeReuse(best.TimestampQpc, reusedQpc))
                 return false;
             value = best.Value;
             Remove(best);
             return true;
         }
 
-        public void Purge(long nowTick, bool flushAll, int force = 0)
+        public void Purge(long nowTick, bool flushAll)
         {
-            while (_order.TryPeek(out Entry? oldest))
+            if (flushAll)
             {
-                if (!oldest.Consumed && !flushAll && force <= 0 && nowTick - oldest.ReceivedTick < keepMs)
-                    break;
-
-                _order.Dequeue();
-                force--;
-                if (!oldest.Consumed)
-                    Remove(oldest);
+                _byIrp.Clear();
+                _firstArrived = null;
+                _lastArrived = null;
+                Count = 0;
+                return;
             }
+
+            while (_firstArrived is { } oldest && nowTick - oldest.ReceivedTick >= keepMs)
+                Remove(oldest);
         }
 
         private void Remove(Entry item)
         {
-            item.Consumed = true;
-            if (!_byIrp.TryGetValue(item.Irp, out Entry? head))
-                return;
-
-            if (ReferenceEquals(head, item))
+            ref Chain chain = ref CollectionsMarshal.GetValueRefOrNullRef(_byIrp, item.Irp);
+            if (--chain.Count == 0)
             {
-                if (item.Next is null)
-                    _byIrp.Remove(item.Irp);
+                _byIrp.Remove(item.Irp);
+            }
+            else
+            {
+                if (item.Earlier is null)
+                    chain.Earliest = item.Later!;
                 else
-                    _byIrp[item.Irp] = item.Next;
-                return;
+                    item.Earlier.Later = item.Later;
+                if (item.Later is null)
+                    chain.Latest = item.Earlier!;
+                else
+                    item.Later.Earlier = item.Earlier;
             }
 
-            Entry previous = head;
-            while (previous.Next is { } next)
+            if (item.ArrivedBefore is null)
+                _firstArrived = item.ArrivedAfter;
+            else
+                item.ArrivedBefore.ArrivedAfter = item.ArrivedAfter;
+            if (item.ArrivedAfter is null)
+                _lastArrived = item.ArrivedBefore;
+            else
+                item.ArrivedAfter.ArrivedBefore = item.ArrivedBefore;
+            Count--;
+        }
+    }
+
+    /// <summary>The latest start seen on each request address, followed or not.</summary>
+    /// <remarks>
+    /// Bounded by two generations of <paramref name="capacity"/> addresses: when the newer one is full,
+    /// the older one is dropped. A start never becomes untrue, so forgetting an old one only gives up
+    /// the protection it offered against a much-delayed initiation.
+    /// </remarks>
+    private sealed class StartLog(int capacity)
+    {
+        private Dictionary<ulong, long> _recent = new();
+        private Dictionary<ulong, long> _older = new();
+
+        public int Count => _recent.Count + _older.Count;
+
+        /// <returns>The latest start on <paramref name="irp"/>, or <see cref="long.MinValue"/> when none is known.</returns>
+        public long Latest(ulong irp)
+        {
+            long latest = _recent.TryGetValue(irp, out long recent) ? recent : long.MinValue;
+            return _older.TryGetValue(irp, out long older) && older > latest ? older : latest;
+        }
+
+        public void Note(ulong irp, long timestampQpc)
+        {
+            if (_recent.Count >= capacity)
             {
-                if (ReferenceEquals(next, item))
-                {
-                    previous.Next = item.Next;
-                    return;
-                }
-
-                previous = next;
+                (_recent, _older) = (_older, _recent);
+                _recent.Clear();
             }
+
+            ref long latest = ref CollectionsMarshal.GetValueRefOrAddDefault(_recent, irp, out bool exists);
+            if (!exists || timestampQpc > latest)
+                latest = timestampQpc;
+        }
+
+        public void Clear()
+        {
+            _recent.Clear();
+            _older.Clear();
         }
     }
 }

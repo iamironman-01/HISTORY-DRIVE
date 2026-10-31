@@ -73,10 +73,20 @@ internal sealed class PendingIo
     /// <summary>Hold this operation until its path event arrives (set only once Windows is known to send them).</summary>
     public bool AwaitingPath;
 
-    // Correlator bookkeeping
+    // Correlator bookkeeping. Waiting operations on one request address are chained by start, latest
+    // first: Next is the operation that started before this one, Prev the one that started after it.
     public long ReceivedTick;
     public PendingIo? NextSameIrp;
+    public PendingIo? PrevSameIrp;
     public PendingIo? NextAwaitingPath;
+    public PendingIo? PrevAwaitingPath;
+
+    /// <summary>
+    /// The earliest known start of another operation on the same request address after this one
+    /// began, or <see cref="long.MaxValue"/> while none is known. An address serves one operation at a
+    /// time, so completions and paths logged from then on belong to a later use of the address.
+    /// </summary>
+    public long ReusedQpc = long.MaxValue;
 
     /// <summary>
     /// The request size of a FileIo_ReadWrite event. The kernel field is a ULONG, so one request can ask
