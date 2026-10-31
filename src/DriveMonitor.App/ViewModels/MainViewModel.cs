@@ -568,6 +568,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         TrackedFilesText = $"{DisplayText.Number(_engine.Stats.TrackedFiles)} files tracked";
         DiagnosticsText = BuildDiagnostics();
 
+        // Sorted tables keep a row where it was inserted; rows that grew since are moved to their place now.
+        Activity.ResortChangedRows();
+        Files.ResortChangedRows();
+        Processes.ResortChangedRows();
+
         CheckLogHealth();
         UpdateCounts();
         UpdatePausedText();

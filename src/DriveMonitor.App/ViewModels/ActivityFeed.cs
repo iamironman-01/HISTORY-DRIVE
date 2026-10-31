@@ -21,12 +21,14 @@ public sealed class ActivityFeed
     private readonly Queue<FileActivityEvent> _pauseBuffer = new();
     private readonly List<ActivityRowViewModel> _added = [];
     private readonly List<ActivityRowViewModel> _dirty = [];
+    private readonly ViewResort _resort;
     private bool _groupRepeated = true;
 
     public ActivityFeed(Predicate<object> filter, int maxRows)
     {
         MaxRows = Math.Max(1, maxRows);
         View = new ListCollectionView(_rows) { Filter = filter };
+        _resort = new ViewResort(View);
     }
 
     /// <summary>Raised before rows are added or removed, so the view can remember its scroll position.</summary>
@@ -127,7 +129,17 @@ public sealed class ActivityFeed
     }
 
     /// <summary>Re-applies the filter after a filter setting changed.</summary>
-    public void Refresh() => View.Refresh();
+    public void Refresh()
+    {
+        View.Refresh();
+        _resort.Refreshed();
+    }
+
+    /// <summary>
+    /// Re-sorts a sorted view after grouped rows changed their count or size (see <see cref="ViewResort"/>);
+    /// call about once a second.
+    /// </summary>
+    public void ResortChangedRows() => _resort.Run();
 
     private void Append(IReadOnlyList<FileActivityEvent> events)
     {
@@ -164,6 +176,8 @@ public sealed class ActivityFeed
         if (_added.Count > 0)
             Publish();
 
+        if (_dirty.Count > 0)
+            _resort.RowsChanged();
         foreach (ActivityRowViewModel row in _dirty)
         {
             row.IsDirty = false;
