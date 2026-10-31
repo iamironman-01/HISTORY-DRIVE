@@ -15,6 +15,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="DriveMonitor.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!--
       TraceEvent loads its native DLLs from <architecture>\ next to its own assembly or, in a single-file
       app, next to the exe; KernelTraceControl.dll is needed to start the kernel session. A single-file

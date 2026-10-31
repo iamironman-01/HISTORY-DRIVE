@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using DriveMonitor.Core;
@@ -38,8 +39,8 @@ internal static class LiveMonitor
         }
 
         engine.Drives.SetMonitored(selected);
-        if (options.CsvPath is not null)
-            engine.StartLog(options.CsvPath);
+        if (options.CsvPath is not null && !TryStartLog(engine, options.CsvPath, Console.Error))
+            return 1;
 
         using var stop = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -72,8 +73,11 @@ internal static class LiveMonitor
 
         var printer = new EventPrinter(options);
         var buffer = new List<FileActivityEvent>(4096);
-        DateTime deadline = options.Duration is { } duration ? DateTime.UtcNow + duration : DateTime.MaxValue;
-        while (!stop.IsCancellationRequested && DateTime.UtcNow < deadline)
+
+        // Elapsed time on a monotonic clock: a wall-clock deadline moves when the clock is adjusted.
+        TimeSpan duration = options.Duration ?? TimeSpan.MaxValue;
+        var running = Stopwatch.StartNew();
+        while (!stop.IsCancellationRequested && running.Elapsed < duration)
         {
             stop.Token.WaitHandle.WaitOne(200);
             Flush(engine, printer, buffer);
@@ -84,6 +88,24 @@ internal static class LiveMonitor
         if (!options.NoSummary)
             PrintSummary(engine);
         return 0;
+    }
+
+    /// <summary>
+    /// Starts the CSV log, or says in one line why the file cannot be written (open in another program, a
+    /// folder, an invalid path, no permission) instead of crashing with a stack trace.
+    /// </summary>
+    internal static bool TryStartLog(MonitorEngine engine, string path, TextWriter error)
+    {
+        try
+        {
+            engine.StartLog(path);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            error.WriteLine($"Cannot write the CSV file: {ex.Message}");
+            return false;
+        }
     }
 
     private static void Flush(MonitorEngine engine, EventPrinter printer, List<FileActivityEvent> buffer)
