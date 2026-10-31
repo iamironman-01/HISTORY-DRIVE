@@ -1,0 +1,170 @@
+using System.IO;
+using System.Text.Json;
+
+namespace DriveMonitor.App.Services;
+
+/// <summary>Window position and size in device-independent units.</summary>
+public sealed class WindowBounds
+{
+    public double Left { get; set; }
+
+    public double Top { get; set; }
+
+    public double Width { get; set; }
+
+    public double Height { get; set; }
+
+    public bool IsMaximized { get; set; }
+}
+
+/// <summary>Preferences kept between sessions.</summary>
+public sealed class AppSettings
+{
+    public const int DefaultMaxRows = 20_000;
+    public const int MinimumMaxRows = 1_000;
+    public const int MaximumMaxRows = 1_000_000;
+    public const double DefaultLeftPanelWidth = 300;
+
+    public bool ShowReads { get; set; } = true;
+
+    public bool ShowWrites { get; set; } = true;
+
+    public bool ShowCreated { get; set; } = true;
+
+    public bool ShowDeleted { get; set; } = true;
+
+    public bool ShowRenamed { get; set; } = true;
+
+    public bool ShowOpens { get; set; }
+
+    public bool ShowListings { get; set; }
+
+    /// <summary>Metadata changes (SetInfo) and flushes.</summary>
+    public bool ShowOtherChanges { get; set; }
+
+    public bool ShowPaging { get; set; }
+
+    public bool ShowFailed { get; set; }
+
+    public bool AutoScroll { get; set; } = true;
+
+    public bool GroupRepeated { get; set; } = true;
+
+    public bool HideOwnActivity { get; set; } = true;
+
+    public bool AutoStart { get; set; } = true;
+
+    public bool AutoMonitorNewDrives { get; set; } = true;
+
+    /// <summary>Rows kept in the Live activity list; older rows are removed.</summary>
+    public int MaxRows { get; set; } = DefaultMaxRows;
+
+    /// <summary>Letters of fixed drives (other than the Windows drive) the user chose not to monitor.</summary>
+    public List<string> UnmonitoredFixedDrives { get; set; } = [];
+
+    public bool MonitorSystemDrive { get; set; }
+
+    public WindowBounds? Window { get; set; }
+
+    public double LeftPanelWidth { get; set; } = DefaultLeftPanelWidth;
+
+    public bool IsFixedDriveUnmonitored(char letter) =>
+        UnmonitoredFixedDrives.Contains(char.ToUpperInvariant(letter).ToString(), StringComparer.OrdinalIgnoreCase);
+
+    public void SetFixedDriveMonitored(char letter, bool monitored)
+    {
+        string key = char.ToUpperInvariant(letter).ToString();
+        UnmonitoredFixedDrives.RemoveAll(d => string.Equals(d, key, StringComparison.OrdinalIgnoreCase));
+        if (!monitored)
+            UnmonitoredFixedDrives.Add(key);
+    }
+
+    /// <summary>Repairs values a hand-edited or older file may contain.</summary>
+    internal void Normalize()
+    {
+        MaxRows = Math.Clamp(MaxRows, MinimumMaxRows, MaximumMaxRows);
+
+        // System.Text.Json writes null into non-nullable properties when the file says so.
+        UnmonitoredFixedDrives = (UnmonitoredFixedDrives ?? [])
+            .Select(d => d?.Trim().TrimEnd('\\', ':') ?? "")
+            .Where(d => d.Length == 1 && char.IsAsciiLetter(d[0]))
+            .Select(d => d.ToUpperInvariant())
+            .Distinct()
+            .ToList();
+
+        if (!double.IsFinite(LeftPanelWidth) || LeftPanelWidth < 200 || LeftPanelWidth > 800)
+            LeftPanelWidth = DefaultLeftPanelWidth;
+
+        if (Window is { } w
+            && !(double.IsFinite(w.Left) && double.IsFinite(w.Top)
+                && double.IsFinite(w.Width) && double.IsFinite(w.Height)
+                && w.Width > 0 && w.Height > 0))
+        {
+            Window = null;
+        }
+    }
+}
+
+/// <summary>Loads and saves <see cref="AppSettings"/> as JSON in <c>%LOCALAPPDATA%\DriveMonitor\settings.json</c>.</summary>
+public sealed class SettingsStore
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true,
+    };
+
+    public SettingsStore(string? filePath = null)
+    {
+        FilePath = filePath ?? Path.Combine(AppDataDirectory, "settings.json");
+    }
+
+    /// <summary><c>%LOCALAPPDATA%\DriveMonitor</c>.</summary>
+    public static string AppDataDirectory { get; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveMonitor");
+
+    /// <summary>Where "Record log" writes its CSV files.</summary>
+    public static string LogsDirectory { get; } = Path.Combine(AppDataDirectory, "Logs");
+
+    public string FilePath { get; }
+
+    /// <summary>The saved settings; defaults when the file is missing, unreadable or corrupt.</summary>
+    public AppSettings Load()
+    {
+        try
+        {
+            if (File.Exists(FilePath)
+                && JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), JsonOptions) is { } settings)
+            {
+                settings.Normalize();
+                return settings;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
+        {
+            // Start with defaults; the file is rewritten on exit.
+        }
+
+        return new AppSettings();
+    }
+
+    /// <returns>False when the file could not be written.</returns>
+    public bool TrySave(AppSettings settings)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+
+            // Write a temporary file first so a crash or full disk never leaves a truncated file behind.
+            string temporary = FilePath + ".tmp";
+            File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
+            File.Move(temporary, FilePath, overwrite: true);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+}

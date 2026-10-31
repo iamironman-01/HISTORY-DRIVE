@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <!-- Single place to retarget, e.g. net10.0-windows once the .NET 10 SDK is installed. -->
+    <DriveMonitorTargetFramework>net9.0-windows</DriveMonitorTargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Version>0.1.0</Version>
+    <Product>DriveMonitor</Product>
+    <Company>DriveMonitor</Company>
+    <Copyright>Copyright (c) 2026</Copyright>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+</Project>

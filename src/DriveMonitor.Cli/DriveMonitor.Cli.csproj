@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>$(DriveMonitorTargetFramework)</TargetFramework>
+    <AssemblyName>drivemon</AssemblyName>
+    <RootNamespace>DriveMonitor.Cli</RootNamespace>
+    <!-- The self-test's unbuffered read needs a sector-aligned native buffer. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DriveMonitor.Core\DriveMonitor.Core.csproj" />
+  </ItemGroup>
+
+</Project>

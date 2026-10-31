@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>$(DriveMonitorTargetFramework)</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>DriveMonitor</AssemblyName>
+    <RootNamespace>DriveMonitor.App</RootNamespace>
+    <!-- Kernel file tracing needs administrator rights, so the GUI always asks for elevation. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DriveMonitor.Core\DriveMonitor.Core.csproj" />
+  </ItemGroup>
+
+</Project>
