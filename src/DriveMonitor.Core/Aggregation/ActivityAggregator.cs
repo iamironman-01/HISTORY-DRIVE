@@ -34,7 +34,7 @@ public sealed class ActivityAggregator
     // Folders without a row, remembered when they are opened as folders or listed: Windows reports their
     // delete or rename without the folder flag (MonitorEngine adds it for the folders its FolderTracker knows,
     // by the same rules, but events can also come straight here), and lets a backup-semantics open take a
-    // folder or a file.
+    // folder or a file. A renamed folder is remembered at its new path too.
     private readonly HashSet<string> _folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<char, DriveEntry> _drives = new();
     private readonly Dictionary<(int Pid, string Name), ProcessEntry> _processes = new();
@@ -192,6 +192,10 @@ public sealed class ActivityAggregator
                         process.Renames++;
                     if (file is not null)
                         file.Renamed(ev.TargetPath, ev.Timestamp);
+
+                    // Without a row (the table is full), the flag or the folder memory tells what was renamed.
+                    if (ev.TargetPath is not null)
+                        SetTypeOfRenameTarget(ev.TargetPath, file?.IsDirectory ?? (ev.IsDirectory || _folders.Contains(ev.Path)));
                     break;
 
                 case FileOperation.SetInfo when file is not null && (ev.Flags & FileEventFlags.SizeChange) != 0:
@@ -346,6 +350,32 @@ public sealed class ActivityAggregator
         file = new FileEntry(ev.Path, ev.Drive, directory, ev.Timestamp);
         _files.Add(ev.Path, file);
         return file;
+    }
+
+    /// <summary>
+    /// What was renamed now lives at <paramref name="target"/>, so the target takes its type, as MonitorEngine's
+    /// FolderTracker gives it: metadata changes and paging I/O of a renamed folder then make no file row, and
+    /// its later delete or rename makes a folder row, as the engine publishes them.
+    /// </summary>
+    private void SetTypeOfRenameTarget(string target, bool folder)
+    {
+        if (_files.TryGetValue(target, out FileEntry? row))
+        {
+            // The row of something that used to be there, e.g. a file deleted before the rename.
+            if (row.IsDirectory != folder)
+            {
+                row.IsDirectory = folder;
+                _changedFiles.Add(row);
+            }
+        }
+        else if (folder)
+        {
+            RememberFolder(target);
+        }
+        else if (_folders.Count > 0)
+        {
+            _folders.Remove(target);
+        }
     }
 
     private void RememberFolder(string path)

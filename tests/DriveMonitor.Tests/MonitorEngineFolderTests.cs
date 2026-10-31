@@ -131,6 +131,21 @@ public sealed class MonitorEngineFolderTests
     }
 
     [Fact]
+    public void RenamedFolder_GetsNoFileRowAtItsNewPath()
+    {
+        using MonitorEngine engine = CreateEngine();
+        List(engine, Folder);
+        Rename(engine, Folder, NewName);
+
+        // Neither event names a type; the statistics know the new path as a folder, as the engine does.
+        SetTimestamps(engine, NewName);
+        PagingRead(engine, NewName);
+
+        Assert.DoesNotContain(engine.Stats.GetAllFiles(), f => string.Equals(f.Path, NewName, StringComparison.OrdinalIgnoreCase));
+        Assert.True(FileStats(engine, Folder).IsDirectory);
+    }
+
+    [Fact]
     public void RenameWithoutANewPath_ForgetsTheFolder()
     {
         // Windows 10 sends no path events, so a rename never learns where the folder went.
