@@ -742,8 +742,65 @@ public sealed class FileIoClassifierTests
     }
 
     [Theory]
+    [InlineData('E', @"E:\docs\report.docx", @"e:\docs\final.docx")]
+    [InlineData('E', @"e:\docs\report.docx", @"E:\docs\final.docx")]
+    [InlineData('e', @"e:\docs\report.docx", @"e:\docs\final.docx")]
+    public void RenameEvent_TargetDriveLetterInAnotherCase_IsTheSameDrive(char drive, string path, string target)
+    {
+        PendingIo io = Completed(Io(RawFileOp.Rename), status: 0, info: 0);
+        io.Drive = drive;
+        io.Path = path;
+        io.TargetPath = target;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(target, ev.TargetPath);
+        Assert.Equal($"\u2192 {target}", ev.Detail);
+    }
+
+    [Theory]
+    [InlineData('E', @"C:\Users\someone\renamed.txt")] // the path event of a rename on C: that reused the address
+    [InlineData('E', @"c:\users\someone\renamed.txt")]
+    [InlineData('e', @"F:\photos\renamed.jpg")]
+    [InlineData('E', @"C:\$Recycle.Bin\S-1-5-21-1-2-3-1001\$RAB12CD.docx")] // each volume has its own Recycle Bin
+    public void RenameEvent_WithATargetOnAnotherDrive_IgnoresIt(char drive, string target)
+    {
+        PendingIo io = Completed(Io(RawFileOp.Rename), status: 0, info: 0);
+        io.Drive = drive;
+        io.Path = drive + @":\docs\report.docx";
+        io.TargetPath = target;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Null(ev.TargetPath);
+        Assert.Equal("renamed or moved", ev.Detail);
+    }
+
+    [Theory]
+    [InlineData(FileIoClassifier.FileRenameInformation, "\u2192 E:\\docs\\final.docx", "renamed or moved")]
+    [InlineData(FileIoClassifier.FileRenameInformationEx, "\u2192 E:\\docs\\final.docx", "renamed or moved")]
+    [InlineData(FileIoClassifier.FileLinkInformation, "hard link \u2192 E:\\docs\\final.docx", "hard link created")]
+    [InlineData(FileIoClassifier.FileLinkInformationEx, "hard link \u2192 E:\\docs\\final.docx", "hard link created")]
+    public void SetInfo_RenameOrHardLinkTarget_IsReportedOnlyOnTheSameDrive(int infoClass, string sameDrive, string otherDrive)
+    {
+        PendingIo io = Completed(Io(RawFileOp.SetInfo), status: 0, info: 0);
+        io.InfoClass = infoClass;
+
+        io.TargetPath = @"E:\docs\final.docx";
+        FileActivityEvent onE = Classify(io);
+        io.TargetPath = @"D:\docs\final.docx";
+        FileActivityEvent onD = Classify(io);
+
+        Assert.Equal(@"E:\docs\final.docx", onE.TargetPath);
+        Assert.Equal(sameDrive, onE.Detail);
+        Assert.Null(onD.TargetPath);
+        Assert.Equal(otherDrive, onD.Detail);
+    }
+
+    [Theory]
     [InlineData(@"E:\$RECYCLE.BIN\S-1-5-21-1-2-3-1001\$RAB12CD.docx")]
     [InlineData(@"E:\$Recycle.Bin\S-1-5-18\$R1.docx")]
+    [InlineData(@"e:\$recycle.bin\S-1-5-18\$R2.docx")]
     public void RenameEvent_IntoTheRecycleBin_SaysSo(string target)
     {
         PendingIo io = Completed(Io(RawFileOp.Rename), status: 0, info: 0);
