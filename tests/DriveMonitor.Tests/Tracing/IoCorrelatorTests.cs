@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using DriveMonitor.Core.Models;
 using DriveMonitor.Core.Tracing;
 
 namespace DriveMonitor.Tests.Tracing;
@@ -12,6 +13,7 @@ public sealed class IoCorrelatorTests
 {
     private const ulong Irp = 0xFFFF_9A00_1234_5600;
     private const ulong OtherIrp = 0xFFFF_9A00_1234_7800;
+    private const int StatusObjectNameNotFound = unchecked((int)0xC0000034);
 
     [Fact]
     public void Complete_AfterBegin_MatchesTheOperation()
@@ -553,6 +555,207 @@ public sealed class IoCorrelatorTests
         Assert.False(oldest.Completed);
     }
 
+    // ---- other operations that reuse the address (starts reported through ForeignBegin) ----
+
+    [Fact]
+    public void ForeignStart_BetweenABeginAndACompletion_KeepsThatCompletionFromIt()
+    {
+        // A read on E: is pending; an open on C: reuses its address and fails, and that failure is
+        // delivered before the read's own completion, which sits in another CPU's buffer.
+        var correlator = new IoCorrelator();
+        PendingIo read = Op(Irp, qpc: 110);
+        correlator.Begin(read, nowTick: 0);
+        correlator.ForeignBegin(Irp, timestampQpc: 130);
+
+        Assert.False(correlator.Complete(Irp, timestampQpc: 140, info: 0, status: StatusObjectNameNotFound, nowTick: 0));
+        Assert.False(read.Completed);
+
+        Assert.True(correlator.Complete(Irp, timestampQpc: 120, info: 4096, status: 0, nowTick: 0));
+        Assert.Equal(0, read.NtStatus);
+        Assert.Equal(4096UL, read.CompletionInfo);
+    }
+
+    [Fact]
+    public void ForeignStart_AfterALostCompletion_LeavesTheOperationUnknown()
+    {
+        var correlator = new IoCorrelator(holdMs: 1000);
+        PendingIo write = Op(Irp, qpc: 110);
+        write.Op = RawFileOp.Write;
+        write.IoSize = 65536;
+        correlator.Begin(write, nowTick: 0);
+        correlator.ForeignBegin(Irp, timestampQpc: 10_100); // the write's own completion was lost
+
+        Assert.False(correlator.Complete(Irp, timestampQpc: 10_110, info: 0, status: StatusObjectNameNotFound, nowTick: 0));
+
+        PendingIo released = Assert.Single(Release(correlator, nowTick: 1000));
+        FileActivityEvent? ev = FileIoClassifier.Classify(released, sequence: 1);
+        Assert.NotNull(ev);
+        Assert.Equal(IoStatus.Unknown, ev.Status);
+        Assert.Equal(65536L, ev.Bytes);
+    }
+
+    [Fact]
+    public void LateBegin_DoesNotTakeTheStoredCompletionOfAForeignReuse()
+    {
+        // The reuse's start and completion are delivered first; the read and its own completion sit in
+        // a buffer flushed later.
+        var correlator = new IoCorrelator();
+        correlator.ForeignBegin(Irp, timestampQpc: 250);
+        Assert.False(correlator.Complete(Irp, timestampQpc: 300, info: 24, status: 0, nowTick: 0));
+
+        PendingIo read = Op(Irp, qpc: 100);
+        correlator.Begin(read, nowTick: 0);
+        Assert.False(read.Completed);
+
+        Assert.True(correlator.Complete(Irp, timestampQpc: 150, info: 65536, status: 0, nowTick: 0));
+        Assert.Equal(65536UL, read.CompletionInfo);
+    }
+
+    [Fact]
+    public void ForeignStarts_ArrivingOutOfOrder_TheEarliestAfterTheBeginCounts()
+    {
+        var correlator = new IoCorrelator();
+        PendingIo read = Op(Irp, qpc: 100);
+        correlator.Begin(read, nowTick: 0);
+        correlator.ForeignBegin(Irp, timestampQpc: 300);
+        correlator.ForeignBegin(Irp, timestampQpc: 150); // from another CPU's buffer, delivered later
+
+        Assert.False(correlator.Complete(Irp, timestampQpc: 200, info: 2, status: 0, nowTick: 0)); // the 150 operation's
+        Assert.True(correlator.Complete(Irp, timestampQpc: 120, info: 1, status: 0, nowTick: 0));
+        Assert.Equal(1UL, read.CompletionInfo);
+    }
+
+    [Fact]
+    public void ForeignStarts_LoggedBeforeTheBeginOrAfterTheCompletion_DoNotGetInTheWay()
+    {
+        var correlator = new IoCorrelator();
+        correlator.ForeignBegin(Irp, timestampQpc: 50);
+        PendingIo read = Op(Irp, qpc: 100);
+        correlator.Begin(read, nowTick: 0);
+        correlator.ForeignBegin(Irp, timestampQpc: 300); // the next use, delivered before this completion
+
+        Assert.True(correlator.Complete(Irp, timestampQpc: 200, info: 7, status: 0, nowTick: 0));
+        Assert.Equal(7UL, read.CompletionInfo);
+    }
+
+    [Fact]
+    public void LaterMonitoredStart_KeepsAStrayCompletionFromTheEarlierOperation()
+    {
+        // The first read's completion is late; the second read on the address completes; then comes a
+        // completion of a third use of the address whose start has not arrived yet.
+        var correlator = new IoCorrelator();
+        PendingIo first = Op(Irp, qpc: 100);
+        PendingIo second = Op(Irp, qpc: 300);
+        correlator.Begin(first, nowTick: 0);
+        correlator.Begin(second, nowTick: 0);
+        Assert.True(correlator.Complete(Irp, timestampQpc: 350, info: 2, status: 0, nowTick: 0));
+
+        Assert.False(correlator.Complete(Irp, timestampQpc: 450, info: 3, status: 0, nowTick: 0));
+        Assert.False(first.Completed);
+
+        Assert.True(correlator.Complete(Irp, timestampQpc: 150, info: 1, status: 0, nowTick: 0));
+        Assert.Equal(1UL, first.CompletionInfo);
+        Assert.Equal(2UL, second.CompletionInfo);
+    }
+
+    [Fact]
+    public void LateBegin_IsLimitedByALaterBeginThatIsStillWaiting()
+    {
+        // The second read (300) arrived first and still waits. Two foreign operations followed it, 320 and
+        // 400, delivered out of order, and the completion of the 320 one is stored. The latest start on
+        // the address (400) is not enough to keep the first read from taking it; the second read's start is.
+        var correlator = new IoCorrelator();
+        PendingIo second = Op(Irp, qpc: 300);
+        correlator.Begin(second, nowTick: 0);
+        correlator.ForeignBegin(Irp, timestampQpc: 400);
+        correlator.ForeignBegin(Irp, timestampQpc: 320);
+        Assert.False(correlator.Complete(Irp, timestampQpc: 350, info: 3, status: 0, nowTick: 0));
+
+        PendingIo first = Op(Irp, qpc: 100);
+        correlator.Begin(first, nowTick: 0);
+        Assert.False(first.Completed);
+
+        Assert.True(correlator.Complete(Irp, timestampQpc: 150, info: 1, status: 0, nowTick: 0));
+        Assert.Equal(1UL, first.CompletionInfo);
+        Assert.False(second.Completed);
+    }
+
+    [Fact]
+    public void ForeignStart_BetweenARenameAndAPath_KeepsThatPathFromIt()
+    {
+        var correlator = new IoCorrelator();
+        PendingIo rename = Rename(irp: 0x10, qpc: 100);
+        correlator.Begin(rename, nowTick: 0);
+        correlator.ForeignBegin(0x10, timestampQpc: 130); // a rename on C: reuses the address
+
+        Assert.False(correlator.Annotate(0x10, 140, @"C:\Users\someone\renamed.txt", nowTick: 0));
+        Assert.True(rename.AwaitingPath);
+
+        Assert.True(correlator.Annotate(0x10, 120, @"E:\new.bin", nowTick: 0));
+        Assert.Equal(@"E:\new.bin", rename.TargetPath);
+    }
+
+    [Fact]
+    public void ForeignStart_KeepsAPathFromAnOperationThatWasNotWaitingForOne()
+    {
+        var correlator = new IoCorrelator();
+        PendingIo op = Op(irp: 0x10, qpc: 100);
+        correlator.Begin(op, nowTick: 0);
+        correlator.ForeignBegin(0x10, timestampQpc: 130);
+
+        Assert.False(correlator.Annotate(0x10, 140, @"C:\other.txt", nowTick: 0));
+
+        Assert.Null(op.TargetPath);
+        Assert.Equal(1, correlator.EarlyPathCount);
+    }
+
+    [Fact]
+    public void LateRename_DoesNotTakeTheStoredPathOfAForeignReuse()
+    {
+        var correlator = new IoCorrelator();
+        correlator.ForeignBegin(0x10, timestampQpc: 250);
+        Assert.False(correlator.Annotate(0x10, 300, @"C:\other.txt", nowTick: 0));
+
+        PendingIo rename = Rename(irp: 0x10, qpc: 100);
+        correlator.Begin(rename, nowTick: 0);
+        Assert.Null(rename.TargetPath);
+        Assert.True(rename.AwaitingPath);
+
+        Assert.True(correlator.Annotate(0x10, 150, @"E:\new.bin", nowTick: 0));
+        Assert.Equal(@"E:\new.bin", rename.TargetPath);
+    }
+
+    [Fact]
+    public void StartTable_StaysBoundedAndKeepsTheLatestAddresses()
+    {
+        var correlator = new IoCorrelator(maxStartAddresses: 4);
+        for (ulong n = 1; n <= 100; n++)
+            correlator.ForeignBegin(n * 0x100, timestampQpc: 1000 + (long)n);
+
+        Assert.InRange(correlator.StartAddressCount, 4, 8);
+
+        // The last address is still known: a late begin there does not take the reuse's completion.
+        Assert.False(correlator.Complete(100 * 0x100, timestampQpc: 1200, info: 9, status: 0, nowTick: 0));
+        PendingIo late = Op(100 * 0x100, qpc: 50);
+        correlator.Begin(late, nowTick: 0);
+        Assert.False(late.Completed);
+    }
+
+    [Fact]
+    public void ForeignBegin_WithoutIrp_IsIgnored_AndFlushAllForgetsStarts()
+    {
+        var correlator = new IoCorrelator();
+        correlator.ForeignBegin(0, timestampQpc: 100);
+        Assert.Equal(0, correlator.StartAddressCount);
+
+        correlator.ForeignBegin(Irp, timestampQpc: 250);
+        correlator.Begin(Op(OtherIrp, qpc: 260), nowTick: 0);
+        Assert.Equal(2, correlator.StartAddressCount);
+
+        Release(correlator, nowTick: 0, flushAll: true);
+        Assert.Equal(0, correlator.StartAddressCount);
+    }
+
     // ---- cost on recycled request addresses ----
 
     [Fact]
@@ -621,6 +824,30 @@ public sealed class IoCorrelatorTests
         Assert.All(released, op => Assert.False(op.Completed));
         Assert.Equal(0, correlator.PendingCount);
         Assert.False(correlator.Complete(Irp, timestampQpc: count, info: 1, status: 0, nowTick: 1000)); // nothing left waiting
+        AssertFast(watch);
+    }
+
+    [Fact]
+    public void ForeignStarts_OnAnAddressWithManyWaitingOperations_DoNotWalkThem()
+    {
+        // Lost completions can leave many operations waiting on a hot address while other I/O keeps
+        // reusing it; each foreign start only has to limit the latest of them.
+        const int waiting = 100_000;
+        const int foreign = 100_000;
+        var correlator = new IoCorrelator(maxPending: waiting);
+        for (int i = 0; i < waiting; i++)
+            correlator.Begin(Op(Irp, qpc: 2L * i), nowTick: 0);
+
+        var watch = Stopwatch.StartNew();
+        for (int i = 0; i < foreign; i++)
+        {
+            long qpc = (2L * waiting) + (2L * i);
+            correlator.ForeignBegin(Irp, qpc);
+            Assert.False(correlator.Complete(Irp, qpc + 1, info: 0, status: 0, nowTick: 0)); // the foreign operation's own
+        }
+
+        watch.Stop();
+        Assert.Equal(waiting, correlator.PendingCount);
         AssertFast(watch);
     }
 

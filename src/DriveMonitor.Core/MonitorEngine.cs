@@ -305,6 +305,15 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         }
     }
 
+    void IFileIoSink.OnForeignBegin(ulong irp, long timestampQpc)
+    {
+        if (!Options.UseCompletionEvents)
+            return;
+
+        lock (_correlatorLock)
+            _correlator.ForeignBegin(irp, timestampQpc);
+    }
+
     void IFileIoSink.OnComplete(ulong irp, long timestampQpc, ulong extraInfo, int ntStatus)
     {
         long now = Environment.TickCount64;

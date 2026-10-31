@@ -77,4 +77,11 @@ internal sealed class PendingIo
     public PendingIo? PrevSameIrp;
     public PendingIo? NextAwaitingPath;
     public PendingIo? PrevAwaitingPath;
+
+    /// <summary>
+    /// The earliest known start of another operation on the same request address after this one
+    /// began, or <see cref="long.MaxValue"/> while none is known. An address serves one operation at a
+    /// time, so completions and paths logged from then on belong to a later use of the address.
+    /// </summary>
+    public long ReusedQpc = long.MaxValue;
 }

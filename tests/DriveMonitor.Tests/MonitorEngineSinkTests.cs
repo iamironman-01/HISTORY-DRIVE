@@ -13,6 +13,7 @@ public sealed class MonitorEngineSinkTests
 {
     private const int OtherProcessId = 4242;
     private const string FileOnE = @"E:\photos\img_0042.jpg";
+    private const int StatusObjectNameNotFound = unchecked((int)0xC0000034);
 
     [Fact]
     public void NewEngine_IsIdle()
@@ -235,6 +236,85 @@ public sealed class MonitorEngineSinkTests
     }
 
     [Fact]
+    public void OnComplete_OfAFilteredOutOperationThatReusedTheAddress_IsNotCreditedToTheMonitoredRead()
+    {
+        using MonitorEngine engine = CreateEngine();
+        IFileIoSink sink = engine;
+        string missing = @"C:\Windows\System32\missing.dll";
+        Assert.False(sink.TryAccept(ref missing, OtherProcessId, out _)); // so the source reports its start as foreign
+
+        // qpc 110: 4 KB read on E:. qpc 120: its completion, in another CPU's buffer, delivered last.
+        // qpc 130: an open of the missing C: file reuses the address. qpc 140: it fails, delivered first.
+        sink.OnBegin(Read(irp: 0x10, qpc: 110, size: 4096));
+        sink.OnForeignBegin(0x10, timestampQpc: 130);
+        sink.OnComplete(0x10, timestampQpc: 140, extraInfo: 0, ntStatus: StatusObjectNameNotFound);
+        sink.OnComplete(0x10, timestampQpc: 120, extraInfo: 4096, ntStatus: 0);
+
+        var events = new List<FileActivityEvent>();
+        Assert.Equal(1, engine.DrainEvents(events));
+        FileActivityEvent ev = Assert.Single(events);
+        Assert.Equal(IoStatus.Success, ev.Status);
+        Assert.Equal(4096L, ev.Bytes);
+        Assert.Equal(0L, engine.Stats.FailedEvents);
+    }
+
+    [Fact]
+    public void OnComplete_OfAForeignReuseAfterALostCompletion_LeavesTheWriteWaiting()
+    {
+        using MonitorEngine engine = CreateEngine();
+        IFileIoSink sink = engine;
+
+        // The write's own completion was lost; a C: open reuses the address 10,000 ticks later and fails.
+        sink.OnBegin(Write(irp: 0x10, qpc: 110, size: 65536));
+        sink.OnForeignBegin(0x10, timestampQpc: 10_100);
+        sink.OnComplete(0x10, timestampQpc: 10_110, extraInfo: 0, ntStatus: StatusObjectNameNotFound);
+
+        // Still waiting, to be published as Unknown with the requested size once the hold time is over.
+        Assert.Equal(0, engine.DrainEvents(new List<FileActivityEvent>()));
+        Assert.Equal(1, engine.PendingCompletions);
+        Assert.Equal(0L, engine.Stats.FailedEvents);
+    }
+
+    [Fact]
+    public void OnBegin_OfALateOpen_DoesNotTakeTheResultOfAForeignCreate()
+    {
+        using MonitorEngine engine = CreateEngine();
+        IFileIoSink sink = engine;
+
+        // A create on C: reused the address after the open on E: and its completion (a new file) arrived
+        // first; the open and its own completion sit in a buffer flushed later.
+        sink.OnForeignBegin(0x30, timestampQpc: 250);
+        sink.OnComplete(0x30, timestampQpc: 300, extraInfo: FileIoClassifier.FileCreated, ntStatus: 0);
+        sink.OnBegin(Open(irp: 0x30, qpc: 100));
+        sink.OnComplete(0x30, timestampQpc: 150, extraInfo: FileIoClassifier.FileOpened, ntStatus: 0);
+
+        var events = new List<FileActivityEvent>();
+        Assert.Equal(1, engine.DrainEvents(events));
+        FileActivityEvent ev = Assert.Single(events);
+        Assert.Equal(FileOperation.Open, ev.Operation);
+        Assert.Equal(IoStatus.Success, ev.Status);
+        Assert.Null(ev.Detail);
+    }
+
+    [Fact]
+    public void OnPathOperation_OfAForeignRenameThatReusedTheAddress_IsNotTheRenameTarget()
+    {
+        using MonitorEngine engine = CreateEngine();
+        IFileIoSink sink = engine;
+        sink.OnPathOperation(0x99, timestampQpc: 1, @"E:\elsewhere.txt"); // Windows sends path events
+
+        sink.OnBegin(Rename(irp: 0x20, qpc: 100));
+        sink.OnForeignBegin(0x20, timestampQpc: 130); // a rename on C: reuses the address
+        sink.OnPathOperation(0x20, timestampQpc: 140, @"C:\Users\someone\renamed.txt");
+        sink.OnPathOperation(0x20, timestampQpc: 120, @"E:\photos\renamed.jpg");
+        sink.OnComplete(0x20, timestampQpc: 125, extraInfo: 0, ntStatus: 0);
+
+        var events = new List<FileActivityEvent>();
+        Assert.Equal(1, engine.DrainEvents(events));
+        Assert.Equal(@"E:\photos\renamed.jpg", Assert.Single(events).TargetPath);
+    }
+
+    [Fact]
     public void Publish_BeyondMaxQueuedEvents_DropsTheOldest()
     {
         using MonitorEngine engine = CreateEngine(new MonitorOptions { UseCompletionEvents = false, MaxQueuedEvents = 2 });
@@ -415,5 +495,27 @@ public sealed class MonitorEngineSinkTests
         ProcessName = "viewer.exe",
         IoSize = size,
         Offset = 0,
+    };
+
+    private static PendingIo Write(ulong irp, long qpc, int size)
+    {
+        PendingIo io = Read(irp, qpc, size);
+        io.Op = RawFileOp.Write;
+        io.ProcessName = "robocopy.exe";
+        return io;
+    }
+
+    private static PendingIo Open(ulong irp, long qpc) => new()
+    {
+        Op = RawFileOp.Create,
+        Irp = irp,
+        TimestampQpc = qpc,
+        Timestamp = new DateTime(2026, 10, 30, 12, 0, 0),
+        Path = FileOnE,
+        Drive = 'E',
+        ProcessId = OtherProcessId,
+        ThreadId = 7,
+        ProcessName = "viewer.exe",
+        CreateDisposition = FileIoClassifier.FileOpenIf,
     };
 }
