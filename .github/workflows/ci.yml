@@ -82,21 +82,27 @@ jobs:
           & $exe --self-test $drive --report selftest-report.txt
           $code = $LASTEXITCODE
 
-          # Surface every check as an annotation so the result is visible without opening the log.
+          # Surface every check as an annotation and as a table on the run's summary page.
           function Escape([string] $text) { $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
           if (Test-Path selftest-report.txt) {
             $passed = @()
+            $rows = @("### Kernel trace self-test on $drive", '', '| Result | Check | Observed |', '| --- | --- | --- |')
+            $result = ''
             $inChecks = $false
             foreach ($line in Get-Content selftest-report.txt) {
               if ($line -eq 'Checks:') { $inChecks = $true; continue }
               if ($inChecks -and [string]::IsNullOrWhiteSpace($line)) { $inChecks = $false }
               $text = $line.Trim()
+              if ($inChecks -and $text -match '^(PASS|WARN|FAIL)\s+(.+?) - (.*)$') {
+                $rows += "| $($Matches[1]) | $($Matches[2].Replace('|', '\|')) | $($Matches[3].Replace('|', '\|')) |"
+              }
               if ($text.StartsWith('FAIL')) { Write-Host "::error title=Self-test::$(Escape $text)" }
               elseif ($inChecks -and $text.StartsWith('WARN')) { Write-Host "::warning title=Self-test::$(Escape $text)" }
               elseif ($inChecks) { $passed += $text }
-              elseif ($text.StartsWith('RESULT:')) { Write-Host "::notice title=Self-test result::$(Escape $text)" }
+              elseif ($text.StartsWith('RESULT:')) { Write-Host "::notice title=Self-test result::$(Escape $text)"; $result = $text }
             }
             if ($passed.Count -gt 0) { Write-Host "::notice title=Self-test passed checks::$(Escape ($passed -join ' | '))" }
+            if ($env:GITHUB_STEP_SUMMARY) { ($rows + @('', "**$result**", '')) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8 }
           }
           exit $code
 
