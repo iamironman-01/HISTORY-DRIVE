@@ -44,6 +44,9 @@ internal static class FileIoClassifier
     // FileDispositionInformationEx flag: delete (without it the request cancels a pending delete).
     internal const ulong FileDispositionDelete = 0x1;
 
+    // STATUS_END_OF_FILE: a read that starts at or past the end of the file.
+    internal const int StatusEndOfFile = unchecked((int)0xC0000011);
+
     /// <returns>The event, or null for operations that carry no useful information (e.g. file-pointer moves).</returns>
     internal static FileActivityEvent? Classify(PendingIo io, long sequence)
     {
@@ -246,6 +249,13 @@ internal static class FileIoClassifier
     }
 
     /// <summary>Statuses that end an operation normally even though NT_SUCCESS is false.</summary>
-    private static bool IsBenignFailure(PendingIo io) =>
-        io.Op == RawFileOp.DirEnum && io.NtStatus is NtStatusText.StatusNoMoreFiles or NtStatusText.StatusNoSuchFile;
+    private static bool IsBenignFailure(PendingIo io) => io.Op switch
+    {
+        // The end of a listing, or a pattern that matched nothing.
+        RawFileOp.DirEnum => io.NtStatus is NtStatusText.StatusNoMoreFiles or NtStatusText.StatusNoSuchFile,
+
+        // Moves 0 bytes (Information is 0); every read-until-empty loop (FileStream, StreamReader, CopyTo) ends with one.
+        RawFileOp.Read => io.NtStatus == StatusEndOfFile,
+        _ => false,
+    };
 }

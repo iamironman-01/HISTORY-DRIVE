@@ -184,6 +184,37 @@ public sealed class FileIoClassifierTests
         Assert.Equal(0L, ev.Bytes);
     }
 
+    [Fact]
+    public void EndOfFile_OnARead_IsASuccessfulZeroByteRead()
+    {
+        // The read that ends a read-until-empty loop: it starts at the end of the file and moves nothing.
+        PendingIo io = Completed(Io(RawFileOp.Read), FileIoClassifier.StatusEndOfFile, info: 0);
+        io.IoSize = 4096;
+        io.Offset = 10_000;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(FileOperation.Read, ev.Operation);
+        Assert.Equal(IoStatus.Success, ev.Status);
+        Assert.Equal(FileIoClassifier.StatusEndOfFile, ev.NtStatus);
+        Assert.Equal(0L, ev.Bytes);
+        Assert.Equal(10_000L, ev.Offset);
+        Assert.Null(ev.Detail);
+    }
+
+    [Fact]
+    public void EndOfFile_OnAWrite_IsAFailure()
+    {
+        PendingIo io = Completed(Io(RawFileOp.Write), FileIoClassifier.StatusEndOfFile, info: 0);
+        io.IoSize = 4096;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(IoStatus.Failed, ev.Status);
+        Assert.Equal("end of file", ev.Detail);
+        Assert.Equal(0L, ev.Bytes);
+    }
+
     // ---- create ----
 
     [Theory]
