@@ -20,6 +20,14 @@ internal interface IFileIoSink
 
     void OnBegin(PendingIo io);
 
+    /// <summary>
+    /// An initiation that does not reach <see cref="OnBegin"/>: rejected by <see cref="TryAccept"/>, or of
+    /// a kind DriveMonitor does not report (cleanup, close, query, file-system control, change
+    /// notification, and folder listings when they are not captured). Its request address is busy from
+    /// <paramref name="timestampQpc"/> on, so the completions that follow there are not an earlier operation's.
+    /// </summary>
+    void OnForeignBegin(ulong irp, long timestampQpc);
+
     void OnComplete(ulong irp, long timestampQpc, ulong extraInfo, int ntStatus);
 
     /// <summary>A path from a FileIo_PathOperation event (rename or hard-link target), already converted to a DOS path when possible.</summary>
@@ -283,7 +291,19 @@ internal sealed class EtwFileIoSource : IDisposable
         if (_options.CaptureDirectoryListings)
             kernel.FileIODirEnum += OnDirEnum;
         if (_options.UseCompletionEvents)
+        {
             kernel.FileIOOperationEnd += OnOperationEnd;
+
+            // Not reported, but they occupy a request address like any other operation and their
+            // completions arrive all the same, so the correlator has to know when they start.
+            kernel.FileIOCleanup += OnForeignSimpleOp;
+            kernel.FileIOQueryInfo += OnForeignInfo;
+            kernel.FileIOFSControl += OnForeignInfo;
+            kernel.FileIODirNotify += OnForeignDirEnum;
+            if (!_options.CaptureDirectoryListings)
+                kernel.FileIODirEnum += OnForeignDirEnum;
+        }
+
         if (_options.ParsePathOperations)
             source.UnhandledEvents += OnUnhandled;
     }
@@ -397,6 +417,43 @@ internal sealed class EtwFileIoSource : IDisposable
         {
             // Close, not Cleanup: paging I/O can still use the file object after its last handle closed.
             _nameByFileObject.Remove(d.FileObject);
+            _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
+        }
+        catch (Exception ex)
+        {
+            RecordCallbackError(ex);
+        }
+    }
+
+    private void OnForeignSimpleOp(FileIOSimpleOpTraceData d)
+    {
+        try
+        {
+            _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
+        }
+        catch (Exception ex)
+        {
+            RecordCallbackError(ex);
+        }
+    }
+
+    private void OnForeignInfo(FileIOInfoTraceData d)
+    {
+        try
+        {
+            _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
+        }
+        catch (Exception ex)
+        {
+            RecordCallbackError(ex);
+        }
+    }
+
+    private void OnForeignDirEnum(FileIODirEnumTraceData d)
+    {
+        try
+        {
+            _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
         }
         catch (Exception ex)
         {
@@ -413,7 +470,10 @@ internal sealed class EtwFileIoSource : IDisposable
             Remember(_nameByFileObject, d.FileObject, path);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {
@@ -449,7 +509,10 @@ internal sealed class EtwFileIoSource : IDisposable
             string path = ResolveName(d.FileName, d.FileKey, d.FileObject);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {
@@ -464,7 +527,7 @@ internal sealed class EtwFileIoSource : IDisposable
                 ProcessId = pid,
                 ThreadId = d.ThreadID,
                 ProcessName = ProcessName(pid, d),
-                IoSize = d.IoSize,
+                IoSize = PendingIo.RequestSize(d.IoSize),
                 Offset = d.Offset,
                 IrpFlags = d.IoFlags,
             });
@@ -489,7 +552,10 @@ internal sealed class EtwFileIoSource : IDisposable
             string path = ResolveName(d.FileName, d.FileKey, d.FileObject);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {
@@ -522,7 +588,10 @@ internal sealed class EtwFileIoSource : IDisposable
             string path = ResolveName(d.FileName, d.FileKey, d.FileObject);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {
@@ -553,7 +622,10 @@ internal sealed class EtwFileIoSource : IDisposable
             string path = ResolveName(d.DirectoryName, d.FileKey, d.FileObject);
             int pid = d.ProcessID;
             if (!_sink.TryAccept(ref path, pid, out char drive))
+            {
+                _sink.OnForeignBegin(d.IrpPtr, Qpc(d));
                 return;
+            }
 
             _sink.OnBegin(new PendingIo
             {

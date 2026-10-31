@@ -7,6 +7,7 @@ internal static class FileIoClassifier
 {
     // NT CreateOptions bits (the low 24 bits of the FileIo_Create CreateOptions field).
     internal const int FileDirectoryFile = 0x00000001;
+    internal const int FileNonDirectoryFile = 0x00000040;
     internal const int FileDeleteOnClose = 0x00001000;
 
     // NT create dispositions.
@@ -44,6 +45,9 @@ internal static class FileIoClassifier
     // FileDispositionInformationEx flag: delete (without it the request cancels a pending delete).
     internal const ulong FileDispositionDelete = 0x1;
 
+    // STATUS_END_OF_FILE: a read that starts at or past the end of the file.
+    internal const int StatusEndOfFile = unchecked((int)0xC0000011);
+
     /// <returns>The event, or null for operations that carry no useful information (e.g. file-pointer moves).</returns>
     internal static FileActivityEvent? Classify(PendingIo io, long sequence)
     {
@@ -73,14 +77,20 @@ internal static class FileIoClassifier
                 {
                     IoStatus.Success => TransferredBytes(io),
                     IoStatus.Failed => 0,
-                    _ => Math.Max(io.IoSize, 0),
+                    _ => io.IoSize,
                 };
                 break;
 
             case RawFileOp.Create:
                 (operation, detail) = ClassifyCreate(io, status);
+
+                // Without either type option an open takes a folder as well as a file (backup semantics); a create
+                // without FILE_DIRECTORY_FILE always makes a file, so only an open leaves the type in doubt.
                 if ((io.CreateOptions & FileDirectoryFile) != 0)
                     flags |= FileEventFlags.Directory;
+                else if (operation == FileOperation.Open && (io.CreateOptions & FileNonDirectoryFile) == 0)
+                    flags |= FileEventFlags.MaybeDirectory;
+
                 if ((io.CreateOptions & FileDeleteOnClose) != 0 && status != IoStatus.Failed)
                 {
                     flags |= FileEventFlags.DeleteOnClose;
@@ -90,7 +100,7 @@ internal static class FileIoClassifier
                 break;
 
             case RawFileOp.Delete:
-                (operation, detail) = ClassifyDisposition(io);
+                (operation, detail, flags) = ClassifyDisposition(io);
                 break;
 
             case RawFileOp.Rename:
@@ -105,7 +115,7 @@ internal static class FileIoClassifier
                     case FilePositionInformation:
                         return null; // only moves the file pointer
                     case FileDispositionInformation or FileDispositionInformationEx:
-                        (operation, detail) = ClassifyDisposition(io);
+                        (operation, detail, flags) = ClassifyDisposition(io);
                         break;
                     case FileRenameInformation or FileRenameInformationEx:
                         operation = FileOperation.Rename;
@@ -194,9 +204,9 @@ internal static class FileIoClassifier
     /// <summary>
     /// A disposition request carries the requested state in ExtraInfo: the DeleteFile boolean for
     /// FileDispositionInformation, flags for FileDispositionInformationEx. Without the delete bit
-    /// the request cancels a pending delete.
+    /// the request cancels a pending delete, which the DeleteCancelled flag tells the statistics.
     /// </summary>
-    private static (FileOperation Operation, string? Detail) ClassifyDisposition(PendingIo io)
+    private static (FileOperation Operation, string? Detail, FileEventFlags Flags) ClassifyDisposition(PendingIo io)
     {
         bool cancels = io.InfoClass switch
         {
@@ -204,7 +214,9 @@ internal static class FileIoClassifier
             FileDispositionInformationEx => (io.ExtraInfo & FileDispositionDelete) == 0,
             _ => false,
         };
-        return cancels ? (FileOperation.SetInfo, "delete cancelled") : (FileOperation.Delete, null);
+        return cancels
+            ? (FileOperation.SetInfo, "delete cancelled", FileEventFlags.DeleteCancelled)
+            : (FileOperation.Delete, null, FileEventFlags.None);
     }
 
     /// <summary>The reported rename/link target, if it is a DOS path that differs from the old path.</summary>
@@ -238,14 +250,20 @@ internal static class FileIoClassifier
 
     private static long TransferredBytes(PendingIo io)
     {
-        // Completion Information = bytes transferred; it can never exceed the request.
-        ulong transferred = io.CompletionInfo;
-        if (io.IoSize > 0 && transferred > (ulong)io.IoSize)
-            transferred = (ulong)io.IoSize;
-        return transferred > int.MaxValue ? int.MaxValue : (long)transferred;
+        // Completion Information = bytes transferred; it can never exceed the request, nor, when no request
+        // size was recorded, the most a single request can ask for (a ULONG).
+        ulong limit = io.IoSize > 0 ? (ulong)io.IoSize : uint.MaxValue;
+        return (long)Math.Min(io.CompletionInfo, limit);
     }
 
     /// <summary>Statuses that end an operation normally even though NT_SUCCESS is false.</summary>
-    private static bool IsBenignFailure(PendingIo io) =>
-        io.Op == RawFileOp.DirEnum && io.NtStatus is NtStatusText.StatusNoMoreFiles or NtStatusText.StatusNoSuchFile;
+    private static bool IsBenignFailure(PendingIo io) => io.Op switch
+    {
+        // The end of a listing, or a pattern that matched nothing.
+        RawFileOp.DirEnum => io.NtStatus is NtStatusText.StatusNoMoreFiles or NtStatusText.StatusNoSuchFile,
+
+        // Moves 0 bytes (Information is 0); every read-until-empty loop (FileStream, StreamReader, CopyTo) ends with one.
+        RawFileOp.Read => io.NtStatus == StatusEndOfFile,
+        _ => false,
+    };
 }
