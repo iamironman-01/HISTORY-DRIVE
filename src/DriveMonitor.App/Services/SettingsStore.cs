@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using DriveMonitor.Core.IO;
 
 namespace DriveMonitor.App.Services;
 
@@ -149,17 +150,26 @@ public sealed class SettingsStore
         return new AppSettings();
     }
 
-    /// <returns>False when the file could not be written.</returns>
+    /// <returns>False when the file could not be written, or when it or its folder is a link.</returns>
     public bool TrySave(AppSettings settings)
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+            string fullPath = Path.GetFullPath(FilePath);
+            string folderPath = Path.GetDirectoryName(fullPath)!;
+            string name = Path.GetFileName(fullPath);
+            byte[] json = JsonSerializer.SerializeToUtf8Bytes(settings, JsonOptions);
+            Directory.CreateDirectory(folderPath);
+
+            // The app runs elevated, and any program of the user can plant a junction or link in this
+            // folder; LinkSafeFolder refuses links instead of following them.
+            using LinkSafeFolder folder = LinkSafeFolder.Open(folderPath);
 
             // Write a temporary file first so a crash or full disk never leaves a truncated file behind.
-            string temporary = FilePath + ".tmp";
-            File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
-            File.Move(temporary, FilePath, overwrite: true);
+            using FileStream temporary = folder.OpenFile(name + ".tmp", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, allowRename: true);
+            temporary.SetLength(0);
+            temporary.Write(json);
+            folder.Rename(temporary, name);
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
