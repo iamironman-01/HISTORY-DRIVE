@@ -43,27 +43,36 @@ internal static class SelfTest
         }
 
         char drive = options.SelfTestDrive ?? PickDrive();
-        string folder = Path.Combine($"{drive}:\\", $".drivemonitor-selftest-{Environment.ProcessId}");
-        string fileA = Path.Combine(folder, "alpha.bin");
-        string fileB = Path.Combine(folder, "beta.bin");
-        string fileTemp = Path.Combine(folder, "scratch-delete-on-close.tmp");
-        string missing = Path.Combine(folder, "does-not-exist.txt");
-        string preopened = Path.Combine(folder, "opened-before-start.bin");
+        TestFolder? created = TryCreateFolder(drive, Say);
+        if (created is null)
+        {
+            Save(options, report);
+            return 1;
+        }
+
+        using TestFolder testFolder = created;
+        string folder = testFolder.FullPath;
+        string fileA = testFolder.PathOf("alpha.bin");
+        string fileB = testFolder.PathOf("beta.bin");
+        string fileTemp = testFolder.PathOf("scratch-delete-on-close.tmp");
+        string missing = testFolder.PathOf("does-not-exist.txt");
+        string preopened = testFolder.PathOf("opened-before-start.bin");
         Say($"Drive {drive}:  test folder {folder}");
 
         // A file whose handle exists before the session starts: its name can only come from the
         // kernel's file-name rundown.
-        FileStream? earlyHandle;
+        FileStream? earlyHandle = null;
         try
         {
-            Directory.CreateDirectory(folder);
-            earlyHandle = new FileStream(preopened, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read, 0);
+            earlyHandle = testFolder.CreateNew(preopened, FileAccess.ReadWrite, FileShare.Read);
             earlyHandle.Write(new byte[64 * 1024]);
             earlyHandle.Flush(flushToDisk: true);
         }
         catch (Exception ex)
         {
             Say($"FAIL  could not prepare the test folder: {ex.GetType().Name}: {ex.Message}");
+            earlyHandle?.Dispose();
+            Note(testFolder.Remove(), Say);
             Save(options, report);
             return 1;
         }
@@ -92,7 +101,7 @@ internal static class SelfTest
         {
             Say($"FAIL  could not start the kernel session: {ex.Message}");
             earlyHandle.Dispose();
-            TryDelete(folder, Say);
+            Note(testFolder.Remove(), Say);
             Save(options, report);
             return 1;
         }
@@ -115,7 +124,7 @@ internal static class SelfTest
                 earlyHandle.Flush(flushToDisk: true);
             }
 
-            using (var fs = new FileStream(fileA, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, FileOptions.WriteThrough))
+            using (FileStream fs = testFolder.CreateNew(fileA, FileAccess.Write, FileShare.None, FileOptions.WriteThrough))
             {
                 for (int i = 0; i < 4; i++)
                     fs.Write(data, i * (MiB / 4), MiB / 4);
@@ -130,12 +139,13 @@ internal static class SelfTest
             }
 
             uncachedRead = ReadUnbuffered(fileA);
-            File.Move(fileA, fileB);
+            testFolder.Move(fileA, fileB);
             using (var fs = new FileStream(fileB, FileMode.Open, FileAccess.Write))
                 fs.SetLength(1000);
-            File.Delete(fileB);
-            using (var fs = new FileStream(fileTemp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, FileOptions.DeleteOnClose))
+            testFolder.Delete(fileB);
+            using (FileStream fs = testFolder.CreateNew(fileTemp, FileAccess.Write, FileShare.None, FileOptions.DeleteOnClose))
                 fs.Write(data, 0, 4096);
+            testFolder.Forget(fileTemp); // deleted as its handle closed
             _ = Directory.GetFiles(folder);
             try
             {
@@ -168,7 +178,7 @@ internal static class SelfTest
 
         engine.Stop();
         engine.DrainEvents(events);
-        TryDelete(folder, Say);
+        Note(testFolder.Remove(), Say);
 
         // ---- report ----
         List<Check> checks = Evaluate(events, ownPid, paths);
@@ -315,17 +325,27 @@ internal static class SelfTest
             $"{(io.TargetPath is null ? "" : " target=" + io.TargetPath)}");
     }
 
-    private static void TryDelete(string folder, Action<string> say)
+    /// <summary>
+    /// The drive root is usually writable by every user, and this process is elevated: see
+    /// <see cref="TestFolder"/> for how the folder is kept free of anything another user controls.
+    /// </summary>
+    private static TestFolder? TryCreateFolder(char drive, Action<string> say)
     {
         try
         {
-            if (Directory.Exists(folder))
-                Directory.Delete(folder, recursive: true);
+            return TestFolder.Create($"{drive}:\\");
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
-            say($"note: could not remove {folder}: {ex.Message}");
+            say($"FAIL  could not create the test folder on {drive}: {ex.Message}");
+            return null;
         }
+    }
+
+    private static void Note(string? problem, Action<string> say)
+    {
+        if (problem is not null)
+            say($"note: {problem}");
     }
 
     private static long ReadUnbuffered(string path)
