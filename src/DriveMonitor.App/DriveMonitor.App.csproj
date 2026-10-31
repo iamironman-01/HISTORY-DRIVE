@@ -6,6 +6,7 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>DriveMonitor</AssemblyName>
     <RootNamespace>DriveMonitor.App</RootNamespace>
+    <RuntimeIdentifiers>$(DriveMonitorRuntimeIdentifiers)</RuntimeIdentifiers>
     <!-- Kernel file tracing needs administrator rights, so the GUI always asks for elevation. -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>

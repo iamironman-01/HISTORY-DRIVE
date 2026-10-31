@@ -3,6 +3,8 @@
   <PropertyGroup>
     <TargetFramework>$(DriveMonitorTargetFramework)</TargetFramework>
     <RootNamespace>DriveMonitor.Core</RootNamespace>
+    <!-- Publishing the app or the CLI with -r also restores this library for that runtime. -->
+    <RuntimeIdentifiers>$(DriveMonitorRuntimeIdentifiers)</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>

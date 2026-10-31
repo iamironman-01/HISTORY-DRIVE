@@ -5,6 +5,7 @@
     <TargetFramework>$(DriveMonitorTargetFramework)</TargetFramework>
     <AssemblyName>drivemon</AssemblyName>
     <RootNamespace>DriveMonitor.Cli</RootNamespace>
+    <RuntimeIdentifiers>$(DriveMonitorRuntimeIdentifiers)</RuntimeIdentifiers>
     <!-- The self-test's unbuffered read needs a sector-aligned native buffer. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>

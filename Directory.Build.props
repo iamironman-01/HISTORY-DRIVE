@@ -11,4 +11,17 @@
     <Copyright>Copyright (c) 2026</Copyright>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Each project records its whole package graph, with content hashes, in packages.lock.json. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <!-- On CI (GitHub Actions sets CI=true) restore fails if a lock file no longer matches the
+         project; locally restore still updates the lock files, so packages can be added. -->
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+    <!-- The runtimes the app and the CLI are published for. Core, Cli and App list them as
+         RuntimeIdentifiers so that their lock files also cover a publish with -r (a locked restore
+         for a runtime the lock file lacks fails with NU1004). Restore therefore also downloads
+         the .NET runtime packs for these runtimes. -->
+    <DriveMonitorRuntimeIdentifiers>win-x64</DriveMonitorRuntimeIdentifiers>
+  </PropertyGroup>
 </Project>
