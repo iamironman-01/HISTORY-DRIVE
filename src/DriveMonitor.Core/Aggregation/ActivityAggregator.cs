@@ -16,6 +16,12 @@ namespace DriveMonitor.Core.Aggregation;
 /// on its own, up to a flush interval apart. First and last values, and whether a file is deleted,
 /// therefore follow the event timestamps rather than the order of arrival.
 /// </para>
+/// <para>
+/// Memory stays bounded however long monitoring runs: at most <see cref="MaxTrackedFiles"/> files and
+/// <see cref="MaxTrackedProcesses"/> processes get rows. Events beyond either limit still count in the
+/// drive totals and in the other table, and are counted in <see cref="UntrackedEvents"/> or
+/// <see cref="UntrackedProcessEvents"/>.
+/// </para>
 /// </remarks>
 public sealed class ActivityAggregator
 {
@@ -34,14 +40,22 @@ public sealed class ActivityAggregator
     private HashSet<ProcessEntry> _changedProcesses = new(ReferenceEqualityComparer.Instance);
     private long _failedEvents;
     private long _untrackedEvents;
+    private long _untrackedProcessEvents;
 
-    public ActivityAggregator(int maxTrackedFiles = 200_000)
+    public ActivityAggregator(int maxTrackedFiles = 200_000, int maxTrackedProcesses = 50_000)
     {
         MaxTrackedFiles = maxTrackedFiles;
+        MaxTrackedProcesses = maxTrackedProcesses;
     }
 
     /// <summary>Distinct files and folders with a row; also bounds the folders remembered without one.</summary>
     public int MaxTrackedFiles { get; }
+
+    /// <summary>
+    /// Distinct processes (process ID and name) with a row. Every short-lived program that touches a
+    /// monitored drive adds one, so without a limit a long session would keep growing.
+    /// </summary>
+    public int MaxTrackedProcesses { get; }
 
     /// <summary>Operations that completed with an error (not part of any total).</summary>
     public long FailedEvents => Interlocked.Read(ref _failedEvents);
@@ -49,12 +63,27 @@ public sealed class ActivityAggregator
     /// <summary>Events for new files that arrived after <see cref="MaxTrackedFiles"/> was reached.</summary>
     public long UntrackedEvents => Interlocked.Read(ref _untrackedEvents);
 
+    /// <summary>
+    /// Events of new processes that arrived after <see cref="MaxTrackedProcesses"/> was reached. They still
+    /// count in the drive and file totals. Paging I/O is never attributed to a process, so it is not counted here.
+    /// </summary>
+    public long UntrackedProcessEvents => Interlocked.Read(ref _untrackedProcessEvents);
+
     public int TrackedFiles
     {
         get
         {
             lock (_sync)
                 return _files.Count;
+        }
+    }
+
+    public int TrackedProcesses
+    {
+        get
+        {
+            lock (_sync)
+                return _processes.Count;
         }
     }
 
@@ -186,7 +215,7 @@ public sealed class ActivityAggregator
             {
                 process.Seen(ev.Timestamp);
                 if (file is not null)
-                    process.Files.Add(file);
+                    process.AddFile(file);
                 _changedProcesses.Add(process);
             }
         }
@@ -269,6 +298,7 @@ public sealed class ActivityAggregator
 
         Interlocked.Exchange(ref _failedEvents, 0);
         Interlocked.Exchange(ref _untrackedEvents, 0);
+        Interlocked.Exchange(ref _untrackedProcessEvents, 0);
     }
 
     private DriveEntry GetDrive(char letter)
@@ -370,15 +400,20 @@ public sealed class ActivityAggregator
         }
     }
 
-    private ProcessEntry GetProcess(FileActivityEvent ev)
+    private ProcessEntry? GetProcess(FileActivityEvent ev)
     {
         var key = (ev.ProcessId, ev.ProcessName);
-        if (!_processes.TryGetValue(key, out ProcessEntry? process))
+        if (_processes.TryGetValue(key, out ProcessEntry? process))
+            return process;
+
+        if (_processes.Count >= MaxTrackedProcesses)
         {
-            process = new ProcessEntry(ev.ProcessId, ev.ProcessName, ev.Timestamp);
-            _processes.Add(key, process);
+            Interlocked.Increment(ref _untrackedProcessEvents);
+            return null;
         }
 
+        process = new ProcessEntry(ev.ProcessId, ev.ProcessName, ev.Timestamp);
+        _processes.Add(key, process);
         return process;
     }
 
@@ -510,7 +545,9 @@ public sealed class ActivityAggregator
     private sealed class ProcessEntry(int processId, string name, DateTime firstSeen)
     {
         private DateTime _firstSeen = firstSeen;
-        public readonly HashSet<FileEntry> Files = new(ReferenceEqualityComparer.Instance);
+
+        // Created with the first file row: folder watchers, listings and I/O on untracked files touch none.
+        private HashSet<FileEntry>? _files;
         public long Reads;
         public long Writes;
         public long BytesRead;
@@ -528,7 +565,13 @@ public sealed class ActivityAggregator
                 LastSeen = at;
         }
 
+        public void AddFile(FileEntry file)
+        {
+            _files ??= new HashSet<FileEntry>(ReferenceEqualityComparer.Instance);
+            _files.Add(file);
+        }
+
         public ProcessStatsSnapshot Snapshot() => new(
-            processId, name, Reads, Writes, BytesRead, BytesWritten, Creates, Deletes, Renames, Files.Count, _firstSeen, LastSeen);
+            processId, name, Reads, Writes, BytesRead, BytesWritten, Creates, Deletes, Renames, _files?.Count ?? 0, _firstSeen, LastSeen);
     }
 }

@@ -604,6 +604,57 @@ public sealed class ActivityAggregatorTests
     }
 
     [Fact]
+    public void MaxTrackedProcesses_LaterNewProcessesAreCountedButNotTracked()
+    {
+        var aggregator = new ActivityAggregator(maxTrackedProcesses: 2);
+
+        aggregator.Record(Ev(FileOperation.Read, FileA, bytes: 10, processId: 1, processName: "one.exe"));
+        aggregator.Record(Ev(FileOperation.Read, FileA, bytes: 20, processId: 2, processName: "two.exe"));
+        aggregator.Record(Ev(FileOperation.Write, FileB, bytes: 30, processId: 3, processName: "three.exe", second: 1));
+        aggregator.Record(Ev(FileOperation.Write, FileB, bytes: 40, processId: 3, processName: "three.exe", second: 2));
+        aggregator.Record(Ev(FileOperation.Read, FileA, bytes: 1, processId: 1, processName: "one.exe", second: 3));
+        aggregator.Record(Ev(FileOperation.Write, FileB, bytes: 4096, flags: FileEventFlags.Paging, processId: 4, processName: "System", second: 4));
+
+        Assert.Equal(2, aggregator.MaxTrackedProcesses);
+        Assert.Equal(2, aggregator.TrackedProcesses);
+        Assert.Equal(2L, aggregator.UntrackedProcessEvents); // both events of three.exe; paging I/O never has a process
+        Assert.Equal(0L, aggregator.UntrackedEvents);
+        Assert.Equal(
+            new[] { ("one.exe", 2L, 11L, 1), ("two.exe", 1L, 20L, 1) },
+            aggregator.GetAllProcesses()
+                .OrderBy(p => p.ProcessName, StringComparer.Ordinal)
+                .Select(p => (p.ProcessName, p.Reads, p.BytesRead, p.Files)));
+
+        // The untracked process still counts in the file and drive totals.
+        FileStatsSnapshot b = FileStats(aggregator, FileB);
+        Assert.Equal(2L, b.Writes);
+        Assert.Equal(70L, b.BytesWritten);
+        Assert.Equal("three.exe", b.LastProcess);
+        Assert.Equal("three.exe", b.Processes);
+        DriveTotals drive = Assert.Single(aggregator.GetDriveTotals());
+        Assert.Equal(3L, drive.Reads);
+        Assert.Equal(2L, drive.Writes);
+        Assert.Equal(70L, drive.BytesWritten);
+        Assert.Equal(4096L, drive.PagingBytesWritten);
+    }
+
+    [Fact]
+    public void Clear_ResetsTheProcessLimitAndItsCount()
+    {
+        var aggregator = new ActivityAggregator(maxTrackedProcesses: 1);
+        aggregator.Record(Ev(FileOperation.Read, FileA, processId: 1, processName: "one.exe"));
+        aggregator.Record(Ev(FileOperation.Read, FileA, processId: 2, processName: "two.exe")); // over the cap
+        Assert.Equal(1L, aggregator.UntrackedProcessEvents);
+
+        aggregator.Clear();
+
+        Assert.Equal(0, aggregator.TrackedProcesses);
+        Assert.Equal(0L, aggregator.UntrackedProcessEvents);
+        aggregator.Record(Ev(FileOperation.Read, FileA, processId: 2, processName: "two.exe"));
+        Assert.Equal("two.exe", Assert.Single(aggregator.GetAllProcesses()).ProcessName);
+    }
+
+    [Fact]
     public void TakeChangedFiles_ReturnsEachChangedFileOnceUntilItChangesAgain()
     {
         var aggregator = new ActivityAggregator();
