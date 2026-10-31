@@ -13,14 +13,20 @@ namespace DriveMonitor.Core.Export;
 /// </summary>
 /// <remarks>
 /// Once the constructor returns, the background task is the only code that writes or closes the
-/// file, so <see cref="Dispose"/> can never race it on a slow drive.
+/// file, so <see cref="Dispose"/> can never race it on a slow drive. A long recording is bounded:
+/// at <c>maxFileBytes</c> the log continues in a new file (a "part"), only the newest
+/// <c>maxFiles</c> parts are kept, and the log stops when its drive has less than
+/// <c>minFreeBytes</c> free.
 /// </remarks>
 public sealed class CsvActivityLog : IDisposable
 {
     /// <summary>Encoded rows collected before one write; also how often <see cref="Written"/> moves.</summary>
     private const int ChunkBytes = 64 * 1024;
 
-    /// <summary>The byte-order mark and the column header that start the file.</summary>
+    private const int FreeSpaceCheckMs = 1000;
+    private const int DiskFullHResult = unchecked((int)0x80070070);
+
+    /// <summary>The byte-order mark and the column header that start every part.</summary>
     private static readonly byte[] Header = EncodeHeader();
 
     /// <summary>The longest <see cref="Dispose"/> waits for the rest of the log, even while the drive keeps accepting it.</summary>
@@ -30,24 +36,52 @@ public sealed class CsvActivityLog : IDisposable
     private readonly CancellationTokenSource _abandon = new();
     private readonly StringWriter _row = new(CultureInfo.InvariantCulture);
     private readonly Encoder _encoder = Csv.FileEncoding.GetEncoder();
-    private readonly FileStream _file;
+    private readonly long _maxFileBytes;
+    private readonly int _maxFiles;
+    private readonly long _minFreeBytes;
+    private readonly string _stem;
+    private readonly string _extension;
+
+    /// <summary>This log's parts that are still on disk, oldest first.</summary>
+    private readonly List<string> _parts = [];
     private readonly Task _pump;
+    private FileStream _file;
     private byte[] _buffer = new byte[2 * ChunkBytes];
     private int _buffered;
     private int _bufferedRows;
+    private long _fileBytes;
+    private int _partNumber = 1;
+    private long _nextFreeSpaceCheck;
+    private volatile string _currentFilePath;
     private long _written;
     private long _dropped;
     private int _disposed;
     private volatile Exception? _error;
 
-    public CsvActivityLog(string filePath, int capacity = 100_000)
+    /// <param name="filePath">The first part; later parts insert .002, .003 and so on before the extension.</param>
+    /// <param name="maxFileBytes">Size at which the log continues in a new part; 0 for no limit.</param>
+    /// <param name="maxFiles">How many parts are kept; starting a new one deletes the oldest. 0 keeps all.</param>
+    /// <param name="minFreeBytes">The log stops with an error when less than this is free on its drive; 0 for no check.</param>
+    /// <param name="capacity">Events that may wait for the writer before new ones are dropped.</param>
+    /// <exception cref="IOException">The file cannot be created, or its drive already has less than <paramref name="minFreeBytes"/> free.</exception>
+    public CsvActivityLog(string filePath, long maxFileBytes = 0, int maxFiles = 0, long minFreeBytes = 0, int capacity = 100_000)
     {
-        FilePath = Path.GetFullPath(filePath);
-        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxFileBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxFiles);
+        ArgumentOutOfRangeException.ThrowIfNegative(minFreeBytes);
 
-        // Unbuffered, because the pump writes whole chunks itself; asynchronous, so a write stuck on a
-        // stalled drive can be cancelled instead of keeping the file and the pump busy indefinitely.
-        _file = new FileStream(FilePath, FileMode.Create, FileAccess.Write, FileShare.Read, bufferSize: 0, FileOptions.Asynchronous);
+        FilePath = Path.GetFullPath(filePath);
+        _extension = Path.GetExtension(FilePath);
+        _stem = FilePath[..^_extension.Length];
+        _currentFilePath = FilePath;
+        _maxFileBytes = maxFileBytes;
+        _maxFiles = maxFiles;
+        _minFreeBytes = minFreeBytes;
+
+        // Refuse at once rather than start a log that stops at its first write.
+        CheckFreeSpace();
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        _file = CreateFile(FilePath);
         try
         {
             _file.Write(Header);
@@ -58,6 +92,8 @@ public sealed class CsvActivityLog : IDisposable
             throw;
         }
 
+        _fileBytes = Header.Length;
+        _parts.Add(FilePath);
         _channel = Channel.CreateBounded<FileActivityEvent>(new BoundedChannelOptions(capacity)
         {
             // Dispose also reads: it counts what a stalled pump will never write.
@@ -68,7 +104,11 @@ public sealed class CsvActivityLog : IDisposable
         _pump = Task.Run(PumpAsync);
     }
 
+    /// <summary>The first part of the log, as given to the constructor but made absolute.</summary>
     public string FilePath { get; }
+
+    /// <summary>The part being written: <see cref="FilePath"/>, or a later part once the log has rolled over.</summary>
+    public string CurrentFilePath => _currentFilePath;
 
     /// <summary>Events that reached the file. Final once the log is disposed and its last write has returned.</summary>
     public long Written => Interlocked.Read(ref _written);
@@ -85,10 +125,28 @@ public sealed class CsvActivityLog : IDisposable
     /// <summary>How long <see cref="Dispose"/> waits without the log making progress before it gives up on the rest.</summary>
     internal TimeSpan StallTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>Bytes free for the log on the drive of a path, or null when unknown; tests replace it.</summary>
+    internal Func<string, long?> FreeSpaceProbe { get; set; } = AvailableFreeSpace;
+
     public void Write(FileActivityEvent ev)
     {
         if (!_channel.Writer.TryWrite(ev))
             Interlocked.Increment(ref _dropped);
+    }
+
+    /// <summary>Whether <paramref name="path"/> is one of this log's files: <see cref="FilePath"/> or a later part.</summary>
+    public bool IsLogFile(string path)
+    {
+        if (string.Equals(path, FilePath, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // A later part: the stem, a dot, a number, the extension.
+        int digits = path.Length - _stem.Length - 1 - _extension.Length;
+        return digits > 0
+            && path.StartsWith(_stem, StringComparison.OrdinalIgnoreCase)
+            && path[_stem.Length] == '.'
+            && path.EndsWith(_extension, StringComparison.OrdinalIgnoreCase)
+            && !path.AsSpan(_stem.Length + 1, digits).ContainsAnyExceptInRange('0', '9');
     }
 
     /// <summary>
@@ -123,9 +181,30 @@ public sealed class CsvActivityLog : IDisposable
 
     private static byte[] EncodeHeader()
     {
-        var header = new StringWriter(CultureInfo.InvariantCulture);
+        using var header = new StringWriter(CultureInfo.InvariantCulture);
         Csv.WriteHeader(header, Csv.EventHeader);
         return [.. Csv.FileEncoding.GetPreamble(), .. Csv.FileEncoding.GetBytes(header.ToString())];
+    }
+
+    /// <summary>
+    /// Unbuffered, because the pump writes whole chunks itself; asynchronous, so a write stuck on a
+    /// stalled drive can be cancelled instead of keeping the file and the pump busy indefinitely.
+    /// </summary>
+    private static FileStream CreateFile(string path) =>
+        new(path, FileMode.Create, FileAccess.Write, FileShare.Read, bufferSize: 0, FileOptions.Asynchronous);
+
+    private static long? AvailableFreeSpace(string path)
+    {
+        try
+        {
+            // Uses the drive letter of the path. Network (UNC) paths are rejected and so go unchecked;
+            // a full share still stops the log with its write error.
+            return new DriveInfo(path).AvailableFreeSpace;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private async Task PumpAsync()
@@ -139,12 +218,20 @@ public sealed class CsvActivityLog : IDisposable
             {
                 while (reader.TryRead(out FileActivityEvent? ev))
                 {
+                    int rowStart = _buffered;
                     Append(ev);
+                    if (StartsNewPart(rowStart))
+                    {
+                        // The rows before this one fill the current part; this one starts the next.
+                        await WriteBufferedAsync(rowStart, _bufferedRows - 1, abandon).ConfigureAwait(false);
+                        await StartNextPartAsync(abandon).ConfigureAwait(false);
+                    }
+
                     if (_buffered >= ChunkBytes)
-                        await WriteBufferedAsync(abandon).ConfigureAwait(false);
+                        await WriteBufferedAsync(_buffered, _bufferedRows, abandon).ConfigureAwait(false);
                 }
 
-                await WriteBufferedAsync(abandon).ConfigureAwait(false);
+                await WriteBufferedAsync(_buffered, _bufferedRows, abandon).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (abandon.IsCancellationRequested)
@@ -165,6 +252,7 @@ public sealed class CsvActivityLog : IDisposable
             Interlocked.Add(ref _dropped, _bufferedRows);
             DropQueued();
             CloseFile();
+            _row.Dispose();
 
             // Last, so a caller that sees the error also sees the final counts.
             _error = error;
@@ -189,15 +277,86 @@ public sealed class CsvActivityLog : IDisposable
         _bufferedRows++;
     }
 
-    private async ValueTask WriteBufferedAsync(CancellationToken abandon)
+    /// <summary>
+    /// Whether the row just appended at <paramref name="rowStart"/> would take the current part past
+    /// the size limit. A part always gets at least one row, so even a row larger than the limit is written.
+    /// </summary>
+    private bool StartsNewPart(int rowStart) =>
+        _maxFileBytes > 0 && _fileBytes + _buffered > _maxFileBytes && _fileBytes + rowStart > Header.Length;
+
+    /// <summary>Writes the first <paramref name="bytes"/> of the buffer, which hold <paramref name="rows"/> rows, and keeps the rest.</summary>
+    private async ValueTask WriteBufferedAsync(int bytes, int rows, CancellationToken abandon)
     {
-        if (_bufferedRows == 0)
+        if (rows == 0)
             return;
 
-        await _file.WriteAsync(_buffer.AsMemory(0, _buffered), abandon).ConfigureAwait(false);
-        Interlocked.Add(ref _written, _bufferedRows);
-        _buffered = 0;
-        _bufferedRows = 0;
+        CheckFreeSpaceWhenDue();
+        await _file.WriteAsync(_buffer.AsMemory(0, bytes), abandon).ConfigureAwait(false);
+        _fileBytes += bytes;
+        Interlocked.Add(ref _written, rows);
+        _buffer.AsSpan(bytes, _buffered - bytes).CopyTo(_buffer);
+        _buffered -= bytes;
+        _bufferedRows -= rows;
+    }
+
+    private async ValueTask StartNextPartAsync(CancellationToken abandon)
+    {
+        CloseFile();
+        DeleteOldParts();
+        CheckFreeSpace();
+
+        string path = $"{_stem}.{(++_partNumber).ToString("D3", CultureInfo.InvariantCulture)}{_extension}";
+        _file = CreateFile(path);
+        _parts.Add(path);
+        _currentFilePath = path;
+        await _file.WriteAsync(Header, abandon).ConfigureAwait(false);
+        _fileBytes = Header.Length;
+    }
+
+    /// <summary>Deletes all but the newest parts, so that the next one keeps the number of parts within the limit.</summary>
+    private void DeleteOldParts()
+    {
+        if (_maxFiles == 0)
+            return;
+
+        // A part that another program holds open without delete sharing (a spreadsheet, say) cannot be
+        // deleted now; it stays listed and is tried again before the next part. Newer parts are kept.
+        int excess = _parts.Count - (_maxFiles - 1);
+        for (int i = excess - 1; i >= 0; i--)
+        {
+            try
+            {
+                File.Delete(_parts[i]);
+                _parts.RemoveAt(i);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Kept for now.
+            }
+        }
+    }
+
+    /// <summary>Checks the free space at most once a second; a busy log writes many chunks per second.</summary>
+    private void CheckFreeSpaceWhenDue()
+    {
+        long now = Environment.TickCount64;
+        if (_minFreeBytes == 0 || now < _nextFreeSpaceCheck)
+            return;
+
+        _nextFreeSpaceCheck = now + FreeSpaceCheckMs;
+        CheckFreeSpace();
+    }
+
+    /// <exception cref="IOException">Less than the minimum is free on the log's drive.</exception>
+    private void CheckFreeSpace()
+    {
+        if (_minFreeBytes == 0 || FreeSpaceProbe(FilePath) is not { } free || free >= _minFreeBytes)
+            return;
+
+        throw new IOException(
+            $"Only {Formatting.Bytes(free)} is free on {Path.GetPathRoot(FilePath)}; " +
+            $"the activity log stops when less than {Formatting.Bytes(_minFreeBytes)} is left.",
+            DiskFullHResult);
     }
 
     /// <summary>Ends a pump that is stuck on a stalled drive, and counts what it will never write.</summary>

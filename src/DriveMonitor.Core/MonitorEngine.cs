@@ -33,7 +33,6 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     private Semaphore? _sessionGuard;
     private Timer? _releaseTimer;
     private CsvActivityLog? _log;
-    private volatile string? _logPath;
     private volatile bool _pathOperationsSeen;
     private bool _disposed;
     private int _queued;
@@ -232,19 +231,23 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         return count;
     }
 
-    /// <summary>Starts writing every published event to a CSV file (replacing any current log).</summary>
+    /// <summary>
+    /// Starts writing every published event to a CSV file (replacing any current log), within the size
+    /// and free-space limits in <see cref="Options"/>.
+    /// </summary>
+    /// <exception cref="IOException">The file cannot be created, or its drive is already short of free space.</exception>
     public void StartLog(string filePath)
     {
-        var log = new CsvActivityLog(filePath);
-        _logPath = log.FilePath;
+        const long MB = 1024 * 1024;
+        var log = new CsvActivityLog(
+            filePath,
+            maxFileBytes: Options.MaxLogFileMB * MB,
+            maxFiles: Options.MaxLogFiles,
+            minFreeBytes: Options.MinLogFreeSpaceMB * MB);
         Interlocked.Exchange(ref _log, log)?.Dispose();
     }
 
-    public void StopLog()
-    {
-        _logPath = null;
-        Interlocked.Exchange(ref _log, null)?.Dispose();
-    }
+    public void StopLog() => Interlocked.Exchange(ref _log, null)?.Dispose();
 
     /// <summary>Clears statistics and discards events not yet drained.</summary>
     public void ClearStatistics()
@@ -283,9 +286,8 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         if (processId == _ownProcessId && Options.ExcludeOwnProcess)
             return false;
 
-        // Never report our own log file, or every flush would create more events to log.
-        string? logPath = _logPath;
-        return logPath is null || !string.Equals(path, logPath, StringComparison.OrdinalIgnoreCase);
+        // Never report our own log files, or every write to them would create more events to log.
+        return Volatile.Read(ref _log) is not { } log || !log.IsLogFile(path);
     }
 
     void IFileIoSink.OnBegin(PendingIo io)
