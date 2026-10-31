@@ -24,9 +24,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
 
@@ -43,23 +43,34 @@ jobs:
           --results-directory TestResults
           --collect "XPlat Code Coverage"
 
+      - name: Summarize tests and coverage
+        if: always()
+        shell: pwsh
+        # DriveMonitor.Core is at 64.8 % line coverage; the floor catches regressions, not today's code.
+        run: ./.github/scripts/Write-TestSummary.ps1 -ResultsDirectory TestResults -MinimumLineCoverage 60
+
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: TestResults
           if-no-files-found: ignore
 
   e2e-kernel-trace:
-    name: Kernel trace self-test
+    name: Kernel trace self-test (${{ matrix.os }})
     needs: build-test
-    runs-on: windows-latest
+    # Kernel ETW behaviour can differ between Windows releases, so the live test runs on each server image.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
 
@@ -76,29 +87,52 @@ jobs:
           & $exe --self-test $drive --report selftest-report.txt
           $code = $LASTEXITCODE
 
-          # Surface every check as an annotation so the result is visible without opening the log.
+          # Surface every check as an annotation and as a table on the run's summary page.
           function Escape([string] $text) { $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
           if (Test-Path selftest-report.txt) {
             $passed = @()
+            $rows = @("### Kernel trace self-test on $drive ($env:ImageOS)", '', '| Result | Check | Observed |', '| --- | --- | --- |')
+            $result = ''
             $inChecks = $false
             foreach ($line in Get-Content selftest-report.txt) {
               if ($line -eq 'Checks:') { $inChecks = $true; continue }
               if ($inChecks -and [string]::IsNullOrWhiteSpace($line)) { $inChecks = $false }
               $text = $line.Trim()
+              if ($inChecks -and $text -match '^(PASS|WARN|FAIL)\s+(.+?) - (.*)$') {
+                $rows += "| $($Matches[1]) | $($Matches[2].Replace('|', '\|')) | $($Matches[3].Replace('|', '\|')) |"
+              }
               if ($text.StartsWith('FAIL')) { Write-Host "::error title=Self-test::$(Escape $text)" }
               elseif ($inChecks -and $text.StartsWith('WARN')) { Write-Host "::warning title=Self-test::$(Escape $text)" }
               elseif ($inChecks) { $passed += $text }
-              elseif ($text.StartsWith('RESULT:')) { Write-Host "::notice title=Self-test result::$(Escape $text)" }
+              elseif ($text.StartsWith('RESULT:')) { Write-Host "::notice title=Self-test result::$(Escape $text)"; $result = $text }
             }
             if ($passed.Count -gt 0) { Write-Host "::notice title=Self-test passed checks::$(Escape ($passed -join ' | '))" }
+            if ($env:GITHUB_STEP_SUMMARY) { ($rows + @('', "**$result**", '')) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8 }
           }
           exit $code
 
+      - name: Clean up a session left by a killed process
+        shell: pwsh
+        run: |
+          # A killed drivemon cannot stop its kernel session; the cleanup script must find and stop it.
+          $exe = 'src/DriveMonitor.Cli/bin/Release/net9.0-windows/drivemon.exe'
+          $process = Start-Process -FilePath $exe -ArgumentList '--quiet', '--no-summary' -PassThru
+          Start-Sleep -Seconds 5
+          Stop-Process -Id $process.Id -Force
+          if (-not (logman query -ets | Select-String 'DriveMonitor-CLI')) {
+            throw 'Expected the killed drivemon to leave the DriveMonitor-CLI session running.'
+          }
+          ./scripts/Stop-DriveMonitorSessions.ps1
+          if (logman query -ets | Select-String 'DriveMonitor-CLI') {
+            throw 'DriveMonitor-CLI is still running after the cleanup script.'
+          }
+          Write-Host 'The leftover session was found and stopped.'
+
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: selftest-report
+          name: selftest-report-${{ matrix.os }}
           path: selftest-report.txt
           if-no-files-found: ignore
 
@@ -109,9 +143,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
 
@@ -126,7 +160,7 @@ jobs:
           "$hash  DriveMonitor-win-x64.zip" | Out-File -Encoding ascii DriveMonitor-win-x64.zip.sha256
           Get-Content DriveMonitor-win-x64.zip.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: DriveMonitor-win-x64
           path: |

@@ -188,14 +188,19 @@ public sealed class ActivityAggregator
     /// <summary>Snapshots of the files that changed since the previous call.</summary>
     public List<FileStatsSnapshot> TakeChangedFiles()
     {
-        HashSet<FileEntry> changed;
         lock (_sync)
         {
             if (_changedFiles.Count == 0)
                 return [];
-            changed = _changedFiles;
+            HashSet<FileEntry> changed = _changedFiles;
             _changedFiles = new HashSet<FileEntry>(ReferenceEqualityComparer.Instance);
-            return changed.Select(f => f.Snapshot()).ToList();
+
+            // Snapshots are taken under the lock Record needs on the trace consumer thread, so the list is
+            // sized once rather than regrown, as in the methods below.
+            var snapshots = new List<FileStatsSnapshot>(changed.Count);
+            foreach (FileEntry file in changed)
+                snapshots.Add(file.Snapshot());
+            return snapshots;
         }
     }
 
@@ -206,22 +211,35 @@ public sealed class ActivityAggregator
         {
             if (_changedProcesses.Count == 0)
                 return [];
-            var changed = _changedProcesses;
+            HashSet<ProcessEntry> changed = _changedProcesses;
             _changedProcesses = new HashSet<ProcessEntry>(ReferenceEqualityComparer.Instance);
-            return changed.Select(p => p.Snapshot()).ToList();
+            var snapshots = new List<ProcessStatsSnapshot>(changed.Count);
+            foreach (ProcessEntry process in changed)
+                snapshots.Add(process.Snapshot());
+            return snapshots;
         }
     }
 
     public List<FileStatsSnapshot> GetAllFiles()
     {
         lock (_sync)
-            return _files.Values.Select(f => f.Snapshot()).ToList();
+        {
+            var snapshots = new List<FileStatsSnapshot>(_files.Count);
+            foreach (FileEntry file in _files.Values)
+                snapshots.Add(file.Snapshot());
+            return snapshots;
+        }
     }
 
     public List<ProcessStatsSnapshot> GetAllProcesses()
     {
         lock (_sync)
-            return _processes.Values.Select(p => p.Snapshot()).ToList();
+        {
+            var snapshots = new List<ProcessStatsSnapshot>(_processes.Count);
+            foreach (ProcessEntry process in _processes.Values)
+                snapshots.Add(process.Snapshot());
+            return snapshots;
+        }
     }
 
     public List<DriveTotals> GetDriveTotals()
@@ -300,6 +318,10 @@ public sealed class ActivityAggregator
         // Names beyond the first MaxNamesPerFile: only counted, so a set keeps repeats from inflating the count.
         private HashSet<string>? _extraNames;
 
+        // Every snapshot needs this text, under the lock Record waits for, yet it changes only when a new
+        // name arrives; joining the names for each snapshot would cost an allocation per row per refresh.
+        private string _processesText = "";
+
         public string Path { get; } = path;
         public long Reads;
         public long Writes;
@@ -314,38 +336,37 @@ public sealed class ActivityAggregator
         public string LastProcess = "";
         public string? RenamedTo;
 
+        private int ProcessCount => (_processNames?.Count ?? 0) + (_extraNames?.Count ?? 0);
+
         public void AddProcess(string name)
         {
-            _processNames ??= new List<string>(2);
-            foreach (string existing in _processNames)
+            List<string> names = _processNames ??= new List<string>(2);
+            foreach (string existing in names)
             {
                 if (string.Equals(existing, name, StringComparison.OrdinalIgnoreCase))
                     return;
             }
 
-            if (_processNames.Count < MaxNamesPerFile)
+            if (names.Count < MaxNamesPerFile)
             {
-                _processNames.Add(name);
-                return;
+                names.Add(name);
+            }
+            else
+            {
+                _extraNames ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (_extraNames.Count >= MaxExtraNamesPerFile || !_extraNames.Add(name))
+                    return; // a repeat, or past the names counted: neither changes the text
             }
 
-            _extraNames ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (_extraNames.Count < MaxExtraNamesPerFile)
-                _extraNames.Add(name);
+            int count = ProcessCount;
+            _processesText = count <= 3
+                ? string.Join(", ", names)
+                : $"{names[0]}, {names[1]}, {names[2]} +{count - 3} more";
         }
 
-        public FileStatsSnapshot Snapshot()
-        {
-            int count = (_processNames?.Count ?? 0) + (_extraNames?.Count ?? 0);
-            string names = _processNames is null
-                ? ""
-                : count <= 3
-                    ? string.Join(", ", _processNames)
-                    : $"{string.Join(", ", _processNames.Take(3))} +{count - 3} more";
-            return new FileStatsSnapshot(
-                Path, drive, isDirectory, Reads, Writes, BytesRead, BytesWritten, PagingBytesRead, PagingBytesWritten,
-                Opens, Lifecycle, _firstSeen, LastSeen, LastOperation, LastProcess, names, count, RenamedTo);
-        }
+        public FileStatsSnapshot Snapshot() => new(
+            Path, drive, isDirectory, Reads, Writes, BytesRead, BytesWritten, PagingBytesRead, PagingBytesWritten,
+            Opens, Lifecycle, _firstSeen, LastSeen, LastOperation, LastProcess, _processesText, ProcessCount, RenamedTo);
     }
 
     private sealed class DriveEntry(char letter)

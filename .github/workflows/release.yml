@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish the release
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the release and upload its files
+    env:
+      # Passed through the environment rather than spliced into scripts.
+      TAG: ${{ github.ref_name }}
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Test
+        run: dotnet test DriveMonitor.sln -c Release
+
+      - name: Kernel trace self-test
+        shell: pwsh
+        run: |
+          dotnet build src/DriveMonitor.Cli/DriveMonitor.Cli.csproj -c Release
+          $drive = if (Test-Path 'D:\') { 'D:' } else { 'C:' }
+          & src/DriveMonitor.Cli/bin/Release/net9.0-windows/drivemon.exe --self-test $drive --report selftest-report.txt
+          if ($LASTEXITCODE -ne 0) { throw 'The kernel-trace self-test failed; not releasing.' }
+
+      - name: Publish
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          $out = 'publish/DriveMonitor'
+          dotnet publish src/DriveMonitor.App/DriveMonitor.App.csproj -c Release -r win-x64 --self-contained false -o $out -p:Version=$version
+          dotnet publish src/DriveMonitor.Cli/DriveMonitor.Cli.csproj -c Release -r win-x64 --self-contained false -o $out -p:Version=$version
+          $zip = "DriveMonitor-$version-win-x64.zip"
+          Compress-Archive -Path "$out/*" -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Out-File -Encoding ascii "$zip.sha256"
+          "ZIP=$zip" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+
+      - name: Create the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create $env:TAG $env:ZIP "$($env:ZIP).sha256" selftest-report.txt
+          --title "DriveMonitor $env:TAG" --generate-notes --verify-tag
