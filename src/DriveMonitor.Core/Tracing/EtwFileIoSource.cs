@@ -134,16 +134,16 @@ internal sealed class EtwFileIoSource : IDisposable
 
         _stopping = false;
 
-        // Create replaces a leftover session with the same name (e.g. after a crash).
-        var session = new TraceEventSession(_options.SessionName, TraceEventSessionOptions.Create)
-        {
-            StopOnDispose = true,
-            BufferSizeMB = _options.BufferSizeMB,
-        };
-
+        TraceEventSession? session = null;
         ETWTraceEventSource source;
         try
         {
+            // Create replaces a leftover session with the same name (e.g. after a crash). Assigned before
+            // its properties are set, so the catch below releases it whichever step fails.
+            session = new TraceEventSession(_options.SessionName, TraceEventSessionOptions.Create);
+            session.StopOnDispose = true;
+            session.BufferSizeMB = _options.BufferSizeMB;
+
             // Must be the first call on the session: with a custom name TraceEvent starts it here as a
             // system logger, and reading session.Source first would start an ordinary session that
             // cannot take kernel keywords. TraceEvent adds the Process and Thread keywords itself.
@@ -161,7 +161,9 @@ internal sealed class EtwFileIoSource : IDisposable
         }
         catch (Exception ex)
         {
-            DisposeQuietly(session);
+            // Null when the constructor itself failed; then there is nothing to release.
+            if (session is not null)
+                DisposeQuietly(session);
             throw Translate(ex);
         }
 
