@@ -45,6 +45,41 @@ public sealed class MonitorEngineSinkTests
     }
 
     [Fact]
+    public void Start_AfterDispose_ThrowsObjectDisposedException()
+    {
+        var engine = new MonitorEngine();
+        int stateChanges = 0;
+        engine.StateChanged += (_, _) => stateChanges++;
+
+        engine.Dispose();
+
+        // Checked before the elevation check, so even as administrator no kernel session is created.
+        Assert.Throws<ObjectDisposedException>(engine.Start);
+        Assert.False(engine.IsRunning);
+        Assert.Null(engine.StartedAt);
+        Assert.Equal(0, stateChanges);
+    }
+
+    [Fact]
+    public void Dispose_CalledTwice_IsHarmless()
+    {
+        using var temp = new TempDirectory();
+        var engine = new MonitorEngine();
+        int stateChanges = 0;
+        engine.StateChanged += (_, _) => stateChanges++;
+        engine.StartLog(temp.PathOf("activity.csv"));
+
+        engine.Dispose();
+        engine.Dispose();
+        engine.Stop();
+
+        Assert.Null(engine.Log);
+        Assert.False(engine.IsRunning);
+        Assert.Equal(0, stateChanges);
+        Assert.Throws<ObjectDisposedException>(engine.Start); // the repeated calls did not undo the first
+    }
+
+    [Fact]
     public void TryAccept_PathOnAMonitoredDrive_ReturnsTheDrive()
     {
         using MonitorEngine engine = CreateEngine();
