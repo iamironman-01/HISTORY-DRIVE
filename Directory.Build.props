@@ -5,10 +5,58 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <Version>0.1.0</Version>
-    <Product>DriveMonitor</Product>
-    <Company>DriveMonitor</Company>
-    <Copyright>Copyright (c) 2026</Copyright>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!--
+    Release metadata. Version, InformationalVersion, Product, Description, Company, Copyright and
+    RepositoryUrl become assembly attributes of every binary, and all but RepositoryUrl also appear in
+    its Windows version resource. Authors and RepositoryType are package metadata for dotnet pack.
+  -->
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <!--
+      The product version is Version plus the commit it was built from. The .NET 9 SDK appends the
+      commit itself: its built-in Source Link (Microsoft.Build.Tasks.Git) reads the HEAD commit of the
+      git checkout into SourceRevisionId, unless SourceRevisionId is passed (-p:SourceRevisionId=<id>),
+      and the AddSourceRevisionToInformationalVersion target then appends "+$(SourceRevisionId)", or
+      ".$(SourceRevisionId)" when InformationalVersion already contains a "+". A build from a git
+      checkout therefore reads 0.1.0+<the full 40-character commit SHA>; a build outside a git
+      checkout without SourceRevisionId, e.g. from a source zip, reads 0.1.0.
+      IncludeSourceRevisionInInformationalVersion=false turns the suffix off.
+    -->
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <Product>DriveMonitor</Product>
+    <Description>Shows every read, write, create, delete and rename of each file on pendrives and secondary disks as it happens, using a real-time kernel ETW session.</Description>
+    <Company>DriveMonitor</Company>
+    <Authors>DriveMonitor contributors</Authors>
+    <Copyright>Copyright (c) 2026</Copyright>
+    <RepositoryUrl>https://github.com/iamironman-01/HISTORY-DRIVE</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <!-- Reproducible builds. -->
+  <PropertyGroup>
+    <!-- The same sources and references give byte-identical binaries. This is the SDK default, set
+         here because ContinuousIntegrationBuild below relies on it. -->
+    <Deterministic>true</Deterministic>
+    <!-- On GitHub Actions also keep the build machine out of the output: source paths, including the
+         PDB path recorded in each binary, become /_/... instead of the runner's checkout folder, and
+         Source Link reads only the repository's own git configuration. -->
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Each project records its whole package graph, with content hashes, in packages.lock.json. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <!-- On CI (GitHub Actions sets CI=true) restore fails if a lock file no longer matches the
+         project; locally restore still updates the lock files, so packages can be added. -->
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+    <!-- The runtimes the app and the CLI are published for (see the publish profiles in their
+         Properties\PublishProfiles folders). Core, Cli and App list them as RuntimeIdentifiers so
+         that their lock files also cover a publish for one of them, with -r or a publish profile
+         (a locked restore for a runtime the lock file lacks fails with NU1004). Restore therefore
+         also downloads the .NET runtime packs for these runtimes. -->
+    <DriveMonitorRuntimeIdentifiers>win-x64;win-arm64</DriveMonitorRuntimeIdentifiers>
   </PropertyGroup>
 </Project>
