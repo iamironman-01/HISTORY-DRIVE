@@ -255,6 +255,7 @@ public sealed class FileIoClassifierTests
     {
         PendingIo io = Completed(Io(RawFileOp.Create), status: 0, info);
         io.CreateDisposition = FileIoClassifier.FileOpenIf; // the outcome, not the request, decides
+        io.CreateOptions = FileIoClassifier.FileNonDirectoryFile; // as CreateFileW asks for a file
         io.IoSize = 4096;
         io.Offset = 123;
 
@@ -333,6 +334,45 @@ public sealed class FileIoClassifierTests
         Assert.True(ev.IsDirectory);
     }
 
+    [Theory]
+    [InlineData(FileIoClassifier.FileNonDirectoryFile, FileEventFlags.None)] // CreateFileW without backup semantics
+    [InlineData(FileIoClassifier.FileDirectoryFile, FileEventFlags.Directory)]
+    [InlineData(0, FileEventFlags.MaybeDirectory)] // backup semantics, as folder watchers and backup tools open
+    [InlineData(0x4000, FileEventFlags.MaybeDirectory)] // FILE_OPEN_FOR_BACKUP_INTENT alone
+    public void Create_OpenTypeOptions_SayWhetherTheTargetMayBeAFolder(int createOptions, FileEventFlags expected)
+    {
+        foreach (bool completed in new[] { true, false })
+        {
+            PendingIo io = Io(RawFileOp.Create);
+            if (completed)
+                io = Completed(io, status: 0, FileIoClassifier.FileOpened);
+            io.CreateDisposition = FileIoClassifier.FileOpen;
+            io.CreateOptions = createOptions;
+
+            FileActivityEvent ev = Classify(io);
+
+            Assert.Equal(FileOperation.Open, ev.Operation);
+            Assert.Equal(expected, ev.Flags);
+        }
+    }
+
+    [Theory]
+    [InlineData(FileIoClassifier.FileCreated)]
+    [InlineData(FileIoClassifier.FileOverwritten)]
+    [InlineData(FileIoClassifier.FileSuperseded)]
+    public void Create_WithoutAnyTypeOption_MakesAFile(ulong info)
+    {
+        // Only FILE_DIRECTORY_FILE creates a folder, so a create that accepted either type made a file.
+        PendingIo io = Completed(Io(RawFileOp.Create), status: 0, info);
+        io.CreateDisposition = FileIoClassifier.FileOverwriteIf;
+        io.CreateOptions = 0;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(FileOperation.Create, ev.Operation);
+        Assert.Equal(FileEventFlags.None, ev.Flags);
+    }
+
     [Fact]
     public void Create_DirectoryFlag_IsKeptWhenTheCreateFails()
     {
@@ -348,7 +388,7 @@ public sealed class FileIoClassifierTests
     public void Create_DeleteOnClose_SetsTheFlagAndAddsToTheDetail(ulong info, string detail)
     {
         PendingIo io = Completed(Io(RawFileOp.Create), status: 0, info);
-        io.CreateOptions = FileIoClassifier.FileDeleteOnClose;
+        io.CreateOptions = FileIoClassifier.FileNonDirectoryFile | FileIoClassifier.FileDeleteOnClose;
 
         FileActivityEvent ev = Classify(io);
 

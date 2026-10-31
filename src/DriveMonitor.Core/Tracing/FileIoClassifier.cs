@@ -7,6 +7,7 @@ internal static class FileIoClassifier
 {
     // NT CreateOptions bits (the low 24 bits of the FileIo_Create CreateOptions field).
     internal const int FileDirectoryFile = 0x00000001;
+    internal const int FileNonDirectoryFile = 0x00000040;
     internal const int FileDeleteOnClose = 0x00001000;
 
     // NT create dispositions.
@@ -82,8 +83,14 @@ internal static class FileIoClassifier
 
             case RawFileOp.Create:
                 (operation, detail) = ClassifyCreate(io, status);
+
+                // Without either type option an open takes a folder as well as a file (backup semantics); a create
+                // without FILE_DIRECTORY_FILE always makes a file, so only an open leaves the type in doubt.
                 if ((io.CreateOptions & FileDirectoryFile) != 0)
                     flags |= FileEventFlags.Directory;
+                else if (operation == FileOperation.Open && (io.CreateOptions & FileNonDirectoryFile) == 0)
+                    flags |= FileEventFlags.MaybeDirectory;
+
                 if ((io.CreateOptions & FileDeleteOnClose) != 0 && status != IoStatus.Failed)
                 {
                     flags |= FileEventFlags.DeleteOnClose;

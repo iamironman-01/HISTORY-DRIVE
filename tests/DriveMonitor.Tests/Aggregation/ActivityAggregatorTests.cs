@@ -342,6 +342,194 @@ public sealed class ActivityAggregatorTests
         Assert.Equal(T0.AddSeconds(2), folder.LastSeen);
     }
 
+    [Theory]
+    [InlineData(FileOperation.Open)] // RemoveDirectory opens the folder as a folder, then deletes it
+    [InlineData(FileOperation.List)]
+    public void FolderSeenAsAFolder_GetsAFolderRowWhenDeletedOrRenamed(FileOperation seenAs)
+    {
+        const string photos = @"E:\photos";
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(seenAs, Folder, flags: FileEventFlags.Directory));
+        aggregator.Record(Ev(seenAs, photos, flags: FileEventFlags.Directory));
+        Assert.Equal(0, aggregator.TrackedFiles);
+
+        // Windows reports both without the folder flag.
+        aggregator.Record(Ev(FileOperation.Delete, Folder, second: 1));
+        aggregator.Record(Ev(FileOperation.Rename, photos, second: 1));
+
+        FileStatsSnapshot deleted = FileStats(aggregator, Folder);
+        Assert.True(deleted.IsDirectory);
+        Assert.Equal(FileLifecycle.Deleted, deleted.Lifecycle);
+        FileStatsSnapshot renamed = FileStats(aggregator, photos);
+        Assert.True(renamed.IsDirectory);
+        Assert.Equal(FileLifecycle.Renamed, renamed.Lifecycle);
+    }
+
+    [Fact]
+    public void DeleteAndRenameOfAPathNotSeenAsAFolder_GiveFileRows()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Delete, FileA));
+        aggregator.Record(Ev(FileOperation.Rename, FileB));
+
+        Assert.False(FileStats(aggregator, FileA).IsDirectory);
+        Assert.False(FileStats(aggregator, FileB).IsDirectory);
+    }
+
+    [Fact]
+    public void FolderEvidenceArrivingAfterTheRow_MarksTheRowAsAFolder()
+    {
+        var aggregator = new ActivityAggregator();
+
+        // The delete was delivered before the folder open that preceded it.
+        aggregator.Record(Ev(FileOperation.Delete, Folder, second: 1));
+        aggregator.Record(Ev(FileOperation.Open, Folder, flags: FileEventFlags.Directory));
+
+        FileStatsSnapshot folder = FileStats(aggregator, Folder);
+        Assert.True(folder.IsDirectory);
+        Assert.Equal(FileLifecycle.Deleted, folder.Lifecycle);
+    }
+
+    [Fact]
+    public void OpenThatMayHaveTakenAFolder_GetsNoRowUntilThePathTurnsOutToBeAFile()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Open, Folder, flags: FileEventFlags.MaybeDirectory)); // e.g. a folder watcher
+        aggregator.Record(Ev(FileOperation.Open, FileA, flags: FileEventFlags.MaybeDirectory));
+
+        Assert.Equal(0, aggregator.TrackedFiles);
+        Assert.Equal(0L, aggregator.UntrackedEvents);
+        Assert.Equal(2L, Assert.Single(aggregator.GetDriveTotals()).Events);
+
+        aggregator.Record(Ev(FileOperation.Read, FileA, bytes: 10, second: 1));
+        aggregator.Record(Ev(FileOperation.Open, FileA, flags: FileEventFlags.MaybeDirectory, second: 2));
+
+        FileStatsSnapshot file = Assert.Single(aggregator.GetAllFiles());
+        Assert.Equal(FileA, file.Path);
+        Assert.False(file.IsDirectory);
+        Assert.Equal(1L, file.Reads);
+        Assert.Equal(1, file.Opens); // counted once the path has a row
+    }
+
+    [Fact]
+    public void OpenThatMayHaveTakenAFolder_GetsARowWhenItDeletes()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Open, FileA, flags: FileEventFlags.MaybeDirectory | FileEventFlags.DeleteOnClose));
+
+        FileStatsSnapshot file = FileStats(aggregator, FileA);
+        Assert.False(file.IsDirectory);
+        Assert.Equal(FileLifecycle.Deleted, file.Lifecycle);
+    }
+
+    [Fact]
+    public void FolderOpenedWithDeleteOnClose_GetsAFolderRow()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Open, Folder, flags: FileEventFlags.Directory | FileEventFlags.DeleteOnClose));
+
+        FileStatsSnapshot folder = FileStats(aggregator, Folder);
+        Assert.True(folder.IsDirectory);
+        Assert.Equal(FileLifecycle.Deleted, folder.Lifecycle);
+    }
+
+    [Fact]
+    public void KnownFolder_PagingIoMetadataChangesAndOpensThatTakeEitherTypeGiveNoRow()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.List, Folder, flags: FileEventFlags.Directory));
+        aggregator.Record(Ev(FileOperation.Read, Folder, bytes: 4096, flags: FileEventFlags.Paging, processId: 4, processName: "System", second: 1));
+        aggregator.Record(Ev(FileOperation.SetInfo, Folder, second: 2)); // timestamps set through a backup-semantics handle
+        aggregator.Record(Ev(FileOperation.Open, Folder, flags: FileEventFlags.MaybeDirectory, second: 3));
+        aggregator.Record(Ev(FileOperation.Flush, Folder, second: 4));
+
+        Assert.Equal(0, aggregator.TrackedFiles);
+        Assert.Equal(0L, aggregator.UntrackedEvents);
+        DriveTotals drive = Assert.Single(aggregator.GetDriveTotals());
+        Assert.Equal(5L, drive.Events);
+        Assert.Equal(4096L, drive.PagingBytesRead);
+    }
+
+    [Fact]
+    public void FolderReplacedByAFile_RowTurnsIntoAFile()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.List, Folder, flags: FileEventFlags.Directory));
+        aggregator.Record(Ev(FileOperation.Delete, Folder, second: 1));
+        Assert.True(FileStats(aggregator, Folder).IsDirectory);
+
+        aggregator.Record(Ev(FileOperation.Create, Folder, second: 2));
+
+        FileStatsSnapshot row = FileStats(aggregator, Folder);
+        Assert.False(row.IsDirectory);
+        Assert.Equal(FileLifecycle.Created, row.Lifecycle);
+    }
+
+    [Fact]
+    public void FileReplacedByAFolder_RowTurnsIntoAFolder()
+    {
+        var aggregator = new ActivityAggregator();
+
+        aggregator.Record(Ev(FileOperation.Write, FileA, bytes: 10));
+        aggregator.Record(Ev(FileOperation.Delete, FileA, second: 1));
+        aggregator.Record(Ev(FileOperation.Create, FileA, flags: FileEventFlags.Directory, second: 2));
+
+        FileStatsSnapshot row = FileStats(aggregator, FileA);
+        Assert.True(row.IsDirectory);
+        Assert.Equal(FileLifecycle.Created, row.Lifecycle);
+    }
+
+    [Theory]
+    [InlineData(FileOperation.Read)]
+    [InlineData(FileOperation.Write)]
+    [InlineData(FileOperation.Open)]
+    public void RememberedFolderPath_UsedAsAFile_GetsAFileRow(FileOperation operation)
+    {
+        var aggregator = new ActivityAggregator();
+
+        // The folder went away unseen and a file took its path.
+        aggregator.Record(Ev(FileOperation.List, Folder, flags: FileEventFlags.Directory));
+        aggregator.Record(Ev(operation, Folder, bytes: 5, second: 1));
+        aggregator.Record(Ev(FileOperation.Delete, Folder, second: 2));
+
+        FileStatsSnapshot row = FileStats(aggregator, Folder);
+        Assert.False(row.IsDirectory);
+        Assert.Equal(FileLifecycle.Deleted, row.Lifecycle);
+    }
+
+    [Fact]
+    public void RememberedFolders_AreLimitedLikeTrackedFiles_KeepingTheLatest()
+    {
+        var aggregator = new ActivityAggregator(maxTrackedFiles: 2);
+
+        foreach (string folder in new[] { @"E:\f1", @"E:\f2", @"E:\f2", @"E:\f3" })
+            aggregator.Record(Ev(FileOperation.List, folder, flags: FileEventFlags.Directory));
+        aggregator.Record(Ev(FileOperation.Rename, @"E:\f3", second: 1));
+        aggregator.Record(Ev(FileOperation.Rename, @"E:\f1", second: 1)); // forgotten when f3 did not fit
+
+        Assert.True(FileStats(aggregator, @"E:\f3").IsDirectory);
+        Assert.False(FileStats(aggregator, @"E:\f1").IsDirectory);
+    }
+
+    [Fact]
+    public void Clear_ForgetsRememberedFolders()
+    {
+        var aggregator = new ActivityAggregator();
+        aggregator.Record(Ev(FileOperation.List, Folder, flags: FileEventFlags.Directory));
+
+        aggregator.Clear();
+        aggregator.Record(Ev(FileOperation.Rename, Folder, second: 1));
+
+        Assert.False(FileStats(aggregator, Folder).IsDirectory);
+    }
+
     // ---- limits and snapshots ----
 
     [Fact]

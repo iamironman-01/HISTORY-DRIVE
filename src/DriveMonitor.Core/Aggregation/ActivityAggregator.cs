@@ -19,6 +19,10 @@ public sealed class ActivityAggregator
 
     private readonly object _sync = new();
     private readonly Dictionary<string, FileEntry> _files = new(StringComparer.OrdinalIgnoreCase);
+
+    // Folders without a row, remembered when they are opened as folders or listed: Windows reports their
+    // delete or rename without the folder flag, and lets a backup-semantics open take a folder or a file.
+    private readonly HashSet<string> _folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<char, DriveEntry> _drives = new();
     private readonly Dictionary<(int Pid, string Name), ProcessEntry> _processes = new();
     private HashSet<FileEntry> _changedFiles = new(ReferenceEqualityComparer.Instance);
@@ -31,6 +35,7 @@ public sealed class ActivityAggregator
         MaxTrackedFiles = maxTrackedFiles;
     }
 
+    /// <summary>Distinct files and folders with a row; also bounds the folders remembered without one.</summary>
     public int MaxTrackedFiles { get; }
 
     /// <summary>Operations that completed with an error (not part of any total).</summary>
@@ -253,6 +258,7 @@ public sealed class ActivityAggregator
         lock (_sync)
         {
             _files.Clear();
+            _folders.Clear();
             _drives.Clear();
             _processes.Clear();
             _changedFiles.Clear();
@@ -276,14 +282,21 @@ public sealed class ActivityAggregator
 
     private FileEntry? GetOrAddFile(FileActivityEvent ev)
     {
+        bool? folder = FolderEvidence(ev);
         if (_files.TryGetValue(ev.Path, out FileEntry? file))
-            return file;
-
-        // Folder opens and listings would flood the table while someone browses; folders get a
-        // row only when created, deleted or renamed.
-        if (ev.Operation == FileOperation.List
-            || (ev.IsDirectory && ev.Operation is not (FileOperation.Create or FileOperation.Delete or FileOperation.Rename)))
         {
+            // A path changes type when it is deleted and created again as the other type, and the evidence
+            // can arrive after the delete or rename that created the row.
+            if (folder is bool isFolder)
+                file.IsDirectory = isFolder;
+            return file;
+        }
+
+        bool directory = folder ?? (_folders.Count > 0 && _folders.Contains(ev.Path));
+        if (!WantsRow(ev, directory))
+        {
+            if (folder == true)
+                RememberFolder(ev.Path);
             return null;
         }
 
@@ -293,9 +306,66 @@ public sealed class ActivityAggregator
             return null;
         }
 
-        file = new FileEntry(ev.Path, ev.Drive, ev.IsDirectory, ev.Timestamp);
+        // From here on the row holds the type, so the path need not be remembered.
+        if (_folders.Count > 0)
+            _folders.Remove(ev.Path);
+        file = new FileEntry(ev.Path, ev.Drive, directory, ev.Timestamp);
         _files.Add(ev.Path, file);
         return file;
+    }
+
+    private void RememberFolder(string path)
+    {
+        // Bounded like the file table. Starting over keeps the folders seen last, which is what a delete or
+        // rename right after the open or listing needs.
+        if (_folders.Count >= MaxTrackedFiles)
+        {
+            if (_folders.Contains(path))
+                return;
+            _folders.Clear();
+        }
+
+        _folders.Add(path);
+    }
+
+    /// <summary>
+    /// Folder opens and listings would flood the table while someone browses, so a folder gets a row only
+    /// when it is created, deleted or renamed. An open that may have taken a folder (folder watchers open
+    /// them that way) gets none either unless it deletes; once the path has a row, it counts there.
+    /// </summary>
+    private static bool WantsRow(FileActivityEvent ev, bool directory)
+    {
+        if (ev.Operation == FileOperation.List)
+            return false;
+
+        bool changesPath = ev.Operation is FileOperation.Create or FileOperation.Delete or FileOperation.Rename
+            || (ev.Flags & FileEventFlags.DeleteOnClose) != 0;
+        return changesPath || (!directory && (ev.Flags & FileEventFlags.MaybeDirectory) == 0);
+    }
+
+    /// <summary>True when the event shows its path to be a folder, false when it shows a file, null when it cannot tell.</summary>
+    private static bool? FolderEvidence(FileActivityEvent ev)
+    {
+        if (ev.IsDirectory || ev.Operation == FileOperation.List)
+            return true;
+
+        switch (ev.Operation)
+        {
+            // Only a request with FILE_DIRECTORY_FILE (the Directory flag) creates a folder, and an open without it
+            // refuses folders unless it accepted either type (MaybeDirectory).
+            case FileOperation.Create:
+                return false;
+            case FileOperation.Open:
+                return (ev.Flags & FileEventFlags.MaybeDirectory) != 0 ? null : false;
+
+            // Applications cannot read, write or resize a folder; paging I/O can reach a folder's index.
+            case FileOperation.Read or FileOperation.Write:
+                return ev.IsPaging ? null : false;
+            case FileOperation.SetInfo when (ev.Flags & FileEventFlags.SizeChange) != 0:
+                return false;
+            default:
+                return null;
+        }
     }
 
     private ProcessEntry GetProcess(FileActivityEvent ev)
@@ -323,6 +393,7 @@ public sealed class ActivityAggregator
         private string _processesText = "";
 
         public string Path { get; } = path;
+        public bool IsDirectory = isDirectory;
         public long Reads;
         public long Writes;
         public long BytesRead;
@@ -365,7 +436,7 @@ public sealed class ActivityAggregator
         }
 
         public FileStatsSnapshot Snapshot() => new(
-            Path, drive, isDirectory, Reads, Writes, BytesRead, BytesWritten, PagingBytesRead, PagingBytesWritten,
+            Path, drive, IsDirectory, Reads, Writes, BytesRead, BytesWritten, PagingBytesRead, PagingBytesWritten,
             Opens, Lifecycle, _firstSeen, LastSeen, LastOperation, LastProcess, _processesText, ProcessCount, RenamedTo);
     }
 
