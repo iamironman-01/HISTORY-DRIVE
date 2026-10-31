@@ -43,6 +43,11 @@ jobs:
           --results-directory TestResults
           --collect "XPlat Code Coverage"
 
+      - name: Summarize tests and coverage
+        if: always()
+        shell: pwsh
+        run: ./.github/scripts/Write-TestSummary.ps1 -ResultsDirectory TestResults
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
