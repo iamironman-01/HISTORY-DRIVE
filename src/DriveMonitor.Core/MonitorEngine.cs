@@ -127,14 +127,11 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     /// <summary>Whether Windows accepted the request for names of files already open at start.</summary>
     public bool FileNameRundownRequested => _sources.Current?.RundownRequested ?? false;
 
-    public int PendingCompletions
-    {
-        get
-        {
-            lock (_correlatorLock)
-                return _correlator.PendingCount;
-        }
-    }
+    /// <summary>
+    /// Operations held back for their completion, or behind one that is. Read without the correlator
+    /// lock, so the UI polling it never waits behind the ETW thread.
+    /// </summary>
+    public int PendingCompletions => _correlator.PendingCount;
 
     public CsvActivityLog? Log => Volatile.Read(ref _log);
 

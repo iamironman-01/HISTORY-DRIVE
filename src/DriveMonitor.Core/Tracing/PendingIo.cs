@@ -70,8 +70,11 @@ internal sealed class PendingIo
     /// <summary>Hold this operation until its path event arrives (set only once Windows is known to send them).</summary>
     public bool AwaitingPath;
 
-    // Correlator bookkeeping
+    // Correlator bookkeeping. Waiting operations on one request address are chained by start, latest
+    // first: Next is the operation that started before this one, Prev the one that started after it.
     public long ReceivedTick;
     public PendingIo? NextSameIrp;
+    public PendingIo? PrevSameIrp;
     public PendingIo? NextAwaitingPath;
+    public PendingIo? PrevAwaitingPath;
 }

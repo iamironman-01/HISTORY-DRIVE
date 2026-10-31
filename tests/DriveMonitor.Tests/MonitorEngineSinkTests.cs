@@ -194,6 +194,29 @@ public sealed class MonitorEngineSinkTests
     }
 
     [Fact]
+    public void PendingCompletions_IsReadWithoutWaitingForTheCorrelator()
+    {
+        // The UI polls it every second; the ETW thread may be holding the correlator for a long release.
+        using MonitorEngine engine = CreateEngine();
+        IFileIoSink sink = engine;
+        int? readWhileHeld = null;
+        engine.RawOperationObserver = _ =>
+        {
+            // Runs on this thread while the engine holds the correlator lock to publish the first read.
+            Task<int> read = Task.Run(() => engine.PendingCompletions);
+            if (read.Wait(TimeSpan.FromSeconds(10)))
+                readWhileHeld = read.Result;
+        };
+
+        sink.OnBegin(Read(irp: 0x10, qpc: 100, size: 4096));
+        sink.OnBegin(Read(irp: 0x11, qpc: 110, size: 4096));
+        sink.OnComplete(0x10, timestampQpc: 150, extraInfo: 4096, ntStatus: 0);
+
+        Assert.Equal(1, readWhileHeld); // the second read still waits
+        Assert.Equal(1, engine.PendingCompletions);
+    }
+
+    [Fact]
     public void OnComplete_ArrivingBeforeItsBegin_IsStillMatched()
     {
         using MonitorEngine engine = CreateEngine();
