@@ -474,6 +474,94 @@ public sealed class ActivityAggregatorTests
     }
 
     [Fact]
+    public void Processes_TextFollowsEachNewName_AndIgnoresRepeats()
+    {
+        var aggregator = new ActivityAggregator();
+        string[] expected = ["p0", "p0, p1", "p0, p1, p2", "p0, p1, p2 +1 more", "p0, p1, p2 +2 more"];
+
+        for (int i = 0; i < expected.Length; i++)
+        {
+            aggregator.Record(Ev(FileOperation.Read, FileA, processId: i, processName: $"p{i}"));
+            for (int seen = 0; seen <= i; seen++)
+                aggregator.Record(Ev(FileOperation.Write, FileA, processId: seen, processName: $"P{seen}")); // repeats in another case
+
+            FileStatsSnapshot changed = Assert.Single(aggregator.TakeChangedFiles());
+            Assert.Equal(expected[i], changed.Processes);
+            Assert.Equal(i + 1, changed.ProcessCount);
+            Assert.Equal(expected[i], FileStats(aggregator, FileA).Processes);
+        }
+    }
+
+    [Fact]
+    public void Processes_TextIsReusedUntilANewNameArrives()
+    {
+        var aggregator = new ActivityAggregator();
+        aggregator.Record(Ev(FileOperation.Read, FileA, processId: 1, processName: "one.exe"));
+        aggregator.Record(Ev(FileOperation.Read, FileA, processId: 2, processName: "two.exe"));
+        string before = Assert.Single(aggregator.TakeChangedFiles()).Processes;
+
+        for (int i = 0; i < 100; i++)
+            aggregator.Record(Ev(FileOperation.Write, FileA, bytes: 1, processId: 1, processName: "ONE.EXE"));
+
+        // Snapshots are taken under the lock Record needs; rebuilding the text for each would allocate per row per refresh.
+        Assert.Same(before, Assert.Single(aggregator.TakeChangedFiles()).Processes);
+        Assert.Same(before, FileStats(aggregator, FileA).Processes);
+
+        aggregator.Record(Ev(FileOperation.Read, FileA, processId: 3, processName: "three.exe"));
+
+        Assert.Equal("one.exe, two.exe, three.exe", Assert.Single(aggregator.TakeChangedFiles()).Processes);
+    }
+
+    [Fact]
+    public void Processes_NamesPastTheCountedLimit_LeaveTextAndCountAlone()
+    {
+        const int counted = 16 + 4096; // names listed, plus names only counted
+        var aggregator = new ActivityAggregator();
+        for (int i = 0; i < counted; i++)
+            aggregator.Record(Ev(FileOperation.Read, FileA, processId: i, processName: $"p{i:0000}.exe"));
+
+        FileStatsSnapshot full = Assert.Single(aggregator.TakeChangedFiles());
+        Assert.Equal("p0000.exe, p0001.exe, p0002.exe +4109 more", full.Processes);
+        Assert.Equal(counted, full.ProcessCount);
+
+        aggregator.Record(Ev(FileOperation.Read, FileA, processId: counted, processName: "late.exe"));
+
+        FileStatsSnapshot after = Assert.Single(aggregator.TakeChangedFiles());
+        Assert.Equal(full.Processes, after.Processes);
+        Assert.Equal(counted, after.ProcessCount);
+    }
+
+    [Fact]
+    public void Processes_StaysCorrectThroughManyEventsWhileNewNamesArrive()
+    {
+        var aggregator = new ActivityAggregator();
+        var random = new Random(20261031);
+        var distinct = new List<string>(); // first spelling of each name, in order of arrival
+
+        for (int i = 0; i < 20_000; i++)
+        {
+            int id = random.Next(1 + (i / 500)); // the pool grows to 40 names, well past the 16 that are listed
+            string name = random.Next(2) == 0 ? $"proc{id}.exe" : $"PROC{id}.EXE";
+            if (!distinct.Contains(name, StringComparer.OrdinalIgnoreCase))
+                distinct.Add(name);
+            aggregator.Record(Ev(FileOperation.Read, FileA, bytes: 1, processId: id, processName: name));
+
+            if (random.Next(20) == 0)
+            {
+                FileStatsSnapshot changed = Assert.Single(aggregator.TakeChangedFiles());
+                Assert.Equal(ExpectedProcesses(distinct), changed.Processes);
+                Assert.Equal(distinct.Count, changed.ProcessCount);
+            }
+        }
+
+        FileStatsSnapshot file = FileStats(aggregator, FileA);
+        Assert.True(distinct.Count > 16, "the run should go past the names that are listed");
+        Assert.Equal(ExpectedProcesses(distinct), file.Processes);
+        Assert.Equal(distinct.Count, file.ProcessCount);
+        Assert.Equal(20_000L, file.Reads);
+    }
+
+    [Fact]
     public void ProcessTotals_AreKeyedByProcessIdAndName()
     {
         var aggregator = new ActivityAggregator();
@@ -573,4 +661,10 @@ public sealed class ActivityAggregatorTests
 
     private static FileStatsSnapshot FileStats(ActivityAggregator aggregator, string path) =>
         Assert.Single(aggregator.GetAllFiles(), f => string.Equals(f.Path, path, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The display rule, written out independently of how the aggregator caches the text.</summary>
+    private static string ExpectedProcesses(List<string> distinct) =>
+        distinct.Count <= 3
+            ? string.Join(", ", distinct)
+            : $"{string.Join(", ", distinct.Take(3))} +{distinct.Count - 3} more";
 }
