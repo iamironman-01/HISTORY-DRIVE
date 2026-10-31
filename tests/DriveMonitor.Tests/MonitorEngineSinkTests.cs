@@ -144,12 +144,25 @@ public sealed class MonitorEngineSinkTests
         Assert.NotNull(engine.Log);
         Assert.False(Accept(sink, logPath, OtherProcessId, out _));
         Assert.False(Accept(sink, logPath.ToUpperInvariant(), OtherProcessId, out _));
+        Assert.False(Accept(sink, temp.PathOf("activity.002.csv"), OtherProcessId, out _)); // a later part
         Assert.True(Accept(sink, temp.PathOf("other.csv"), OtherProcessId, out _));
 
         engine.StopLog();
 
         Assert.Null(engine.Log);
         Assert.True(Accept(sink, logPath, OtherProcessId, out _));
+    }
+
+    [Fact]
+    public void StartLog_AppliesTheLogLimitsOfTheOptions()
+    {
+        using var temp = new TempDirectory();
+        string logPath = temp.PathOf("activity.csv");
+        using var engine = new MonitorEngine(new MonitorOptions { MinLogFreeSpaceMB = int.MaxValue });
+
+        Assert.Throws<IOException>(() => engine.StartLog(logPath));
+        Assert.Null(engine.Log);
+        Assert.False(File.Exists(logPath));
     }
 
     [Fact]

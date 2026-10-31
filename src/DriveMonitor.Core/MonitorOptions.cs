@@ -50,6 +50,21 @@ public sealed class MonitorOptions
     /// <summary>Restart the kernel session if it stops unexpectedly (at most three times a minute).</summary>
     public bool AutoRestart { get; set; } = true;
 
+    /// <summary>
+    /// Size (MB) at which the activity log continues in a new file, named like the first with .002, .003
+    /// and so on before the extension; 0 keeps one file of any size. Read when a log starts.
+    /// </summary>
+    public int MaxLogFileMB { get; set; } = 100;
+
+    /// <summary>How many files of one activity log are kept; starting another deletes the oldest. 0 keeps all. Read when a log starts.</summary>
+    public int MaxLogFiles { get; set; } = 10;
+
+    /// <summary>
+    /// The activity log stops with an error when less than this (MB) is free on its drive, so a long
+    /// recording cannot fill the disk; 0 turns the check off. Read when a log starts.
+    /// </summary>
+    public int MinLogFreeSpaceMB { get; set; } = 512;
+
     /// <summary>Hide this program's own file activity, such as saving an export onto a monitored drive.</summary>
     public bool ExcludeOwnProcess
     {

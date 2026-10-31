@@ -63,6 +63,9 @@ internal sealed class EtwFileIoSource : IDisposable
     private const int MaxCachedNames = 500_000;
     private const int ErrorNoSystemResources = unchecked((int)0x800705AA);
 
+    /// <summary>How often the lost-event count is read when <see cref="MonitorOptions.FlushIntervalMs"/> sets no timer of its own.</summary>
+    private const int EventsLostPollMs = 1000;
+
     private readonly IFileIoSink _sink;
     private readonly ProcessNameCache _processNames;
     private readonly Func<string, string> _toDosPath;
@@ -110,7 +113,10 @@ internal sealed class EtwFileIoSource : IDisposable
 
     public string? RundownError { get; private set; }
 
-    /// <summary>Events the kernel dropped because the consumer fell behind (live while running, last value after).</summary>
+    /// <summary>
+    /// Events the kernel dropped because the consumer fell behind (live while running, last value after).
+    /// The timer also reads it, so a session that another program stops leaves out at most one tick of losses.
+    /// </summary>
     public int EventsLost
     {
         get
@@ -118,17 +124,7 @@ internal sealed class EtwFileIoSource : IDisposable
             lock (_sessionLock)
             {
                 if (_session is not null && !_stopping)
-                {
-                    try
-                    {
-                        _eventsLost = _session.EventsLost;
-                    }
-                    catch (Exception)
-                    {
-                        // The session is ending; keep the last known value.
-                    }
-                }
-
+                    ReadEventsLost(_session);
                 return _eventsLost;
             }
         }
@@ -189,8 +185,11 @@ internal sealed class EtwFileIoSource : IDisposable
 
         if (_options.RequestFileNameRundown)
             RequestFileNameRundown(session);
-        if (_options.FlushIntervalMs > 0)
-            _flushTimer = new Timer(_ => FlushBuffers(), null, _options.FlushIntervalMs, _options.FlushIntervalMs);
+
+        // Runs even when nothing is flushed: once another program stops the session, its lost-event
+        // count can no longer be read, so the timer keeps a recent copy.
+        int period = _options.FlushIntervalMs > 0 ? _options.FlushIntervalMs : EventsLostPollMs;
+        _flushTimer = new Timer(_ => FlushBuffers(), null, period, period);
     }
 
     public void Stop()
@@ -203,17 +202,7 @@ internal sealed class EtwFileIoSource : IDisposable
         {
             session = _session;
             if (session is not null)
-            {
-                try
-                {
-                    _eventsLost = session.EventsLost;
-                }
-                catch (Exception)
-                {
-                    // Already gone.
-                }
-            }
-
+                ReadEventsLost(session);
             _session = null;
         }
 
@@ -350,20 +339,39 @@ internal sealed class EtwFileIoSource : IDisposable
 
     private void FlushBuffers()
     {
-        // TraceEvent fixes the kernel flush timer at 1 s; flushing more often shortens the delay
-        // before events reach the screen.
         lock (_sessionLock)
         {
             if (_session is null || _stopping)
                 return;
-            try
+
+            // TraceEvent fixes the kernel flush timer at 1 s; flushing more often shortens the delay
+            // before events reach the screen.
+            if (_options.FlushIntervalMs > 0)
             {
-                _session.Flush();
+                try
+                {
+                    _session.Flush();
+                }
+                catch (Exception)
+                {
+                    // Session ending.
+                }
             }
-            catch (Exception)
-            {
-                // Session ending.
-            }
+
+            ReadEventsLost(_session);
+        }
+    }
+
+    /// <summary>Keeps the kernel's count of lost events while the session can still report it. Call under <c>_sessionLock</c>.</summary>
+    private void ReadEventsLost(TraceEventSession session)
+    {
+        try
+        {
+            _eventsLost = session.EventsLost;
+        }
+        catch (Exception)
+        {
+            // The session is ending or was stopped by another program: keep the last count read.
         }
     }
 
