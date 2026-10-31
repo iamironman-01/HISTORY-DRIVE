@@ -48,6 +48,21 @@ public sealed class CsvLogStartTests
         AssertOneLine(error.ToString());
     }
 
+    [Fact]
+    public void TryStartLog_DriveBelowTheFreeSpaceFloor_FailsWithOneLineAndCreatesNoFile()
+    {
+        using var temp = new TempDirectory();
+        string path = temp.PathOf("activity.csv");
+        using var engine = new MonitorEngine(new MonitorOptions { MinLogFreeSpaceMB = int.MaxValue }); // 2 PB
+        var error = new StringWriter();
+
+        Assert.False(LiveMonitor.TryStartLog(engine, path, error));
+
+        Assert.Null(engine.Log);
+        Assert.False(File.Exists(path));
+        AssertOneLine(error.ToString());
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("activity\0.csv")]
