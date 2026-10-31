@@ -32,7 +32,9 @@ public sealed class ActivityAggregator
     private readonly Dictionary<string, FileEntry> _files = new(StringComparer.OrdinalIgnoreCase);
 
     // Folders without a row, remembered when they are opened as folders or listed: Windows reports their
-    // delete or rename without the folder flag, and lets a backup-semantics open take a folder or a file.
+    // delete or rename without the folder flag (MonitorEngine adds it for the folders its FolderTracker knows,
+    // by the same rules, but events can also come straight here), and lets a backup-semantics open take a
+    // folder or a file.
     private readonly HashSet<string> _folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<char, DriveEntry> _drives = new();
     private readonly Dictionary<(int Pid, string Name), ProcessEntry> _processes = new();
@@ -375,8 +377,11 @@ public sealed class ActivityAggregator
         return changesPath || (!directory && (ev.Flags & FileEventFlags.MaybeDirectory) == 0);
     }
 
-    /// <summary>True when the event shows its path to be a folder, false when it shows a file, null when it cannot tell.</summary>
-    private static bool? FolderEvidence(FileActivityEvent ev)
+    /// <summary>
+    /// True when the event shows its path to be a folder, false when it shows a file, null when it cannot tell.
+    /// Shared with <see cref="FolderTracker"/>, so that the published folder flag follows the same rules.
+    /// </summary>
+    internal static bool? FolderEvidence(FileActivityEvent ev)
     {
         if (ev.IsDirectory || ev.Operation == FileOperation.List)
             return true;

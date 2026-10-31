@@ -58,6 +58,7 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         Volumes = new VolumeMapper();
         Drives = new DriveFilter();
         Stats = new ActivityAggregator(Options.MaxTrackedFiles);
+        Folders = new FolderTracker(Options.MaxTrackedFiles);
         ProcessNames = new ProcessNameCache();
         _correlator = new IoCorrelator(Options.CompletionWaitMs, earlyKeepMs: Options.CompletionWaitMs);
         _publish = Publish;
@@ -157,6 +158,12 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
 
     /// <summary>Diagnostics: sees each raw operation (with its completion) just before it is classified. Must be fast.</summary>
     internal Action<PendingIo>? RawOperationObserver { get; set; }
+
+    /// <summary>
+    /// The paths known to be folders, which give a folder's delete or rename the Directory flag before the
+    /// event is published. Forgotten with the statistics, which remember folders the same way.
+    /// </summary>
+    internal FolderTracker Folders { get; }
 
     public static bool IsElevated
     {
@@ -260,10 +267,11 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
 
     public void StopLog() => Interlocked.Exchange(ref _log, null)?.Dispose();
 
-    /// <summary>Clears statistics and discards events not yet drained.</summary>
+    /// <summary>Clears statistics and the folders known by path, and discards events not yet drained.</summary>
     public void ClearStatistics()
     {
         Stats.Clear();
+        Folders.Clear();
         while (_queue.TryDequeue(out _))
             Interlocked.Decrement(ref _queued);
     }
@@ -395,6 +403,11 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         if (ev is null)
             return;
 
+        // Before anything sees the event, so that the statistics, the log and the feed all get the folder flag
+        // Windows leaves off a folder's delete or rename. Classify returns null only for file-pointer moves and
+        // kinds it does not report, never for a create, open or listing, so every folder open teaches the
+        // tracker here, whatever the queue or the log later does with its event.
+        ev = Folders.Apply(ev);
         Stats.Record(ev);
         Volatile.Read(ref _log)?.Write(ev);
         Interlocked.Increment(ref _published);
