@@ -14,14 +14,17 @@
     <FontFamily x:Key="UiFont">Segoe UI Variable Text, Segoe UI</FontFamily>
     <FontFamily x:Key="IconFont">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
 
-    <!-- Surfaces and text -->
+    <!--
+        Surfaces and text. Text colours keep the WCAG AA contrast of 4.5:1 on every background they are
+        shown on, a selected row included; borders and state marks keep 3:1.
+    -->
     <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#F6F7F9" po:Freeze="True" />
     <SolidColorBrush x:Key="PanelBrush" Color="#FFFFFF" po:Freeze="True" />
     <SolidColorBrush x:Key="PanelBorderBrush" Color="#E3E6EA" po:Freeze="True" />
     <SolidColorBrush x:Key="TextBrush" Color="#1F2328" po:Freeze="True" />
     <SolidColorBrush x:Key="SecondaryTextBrush" Color="#5B636E" po:Freeze="True" />
-    <SolidColorBrush x:Key="TertiaryTextBrush" Color="#8A929C" po:Freeze="True" />
-    <SolidColorBrush x:Key="FailedBrush" Color="#9AA1AB" po:Freeze="True" />
+    <SolidColorBrush x:Key="TertiaryTextBrush" Color="#6B7280" po:Freeze="True" />
+    <SolidColorBrush x:Key="FailedBrush" Color="#606873" po:Freeze="True" />
     <SolidColorBrush x:Key="FailedBadgeBrush" Color="#F0F2F4" po:Freeze="True" />
 
     <!-- Accent and interaction -->
@@ -33,8 +36,17 @@
     <SolidColorBrush x:Key="HoverBrush" Color="#EEF0F3" po:Freeze="True" />
     <SolidColorBrush x:Key="PressedBrush" Color="#E2E5E9" po:Freeze="True" />
     <SolidColorBrush x:Key="ControlBorderBrush" Color="#C9CED5" po:Freeze="True" />
+    <SolidColorBrush x:Key="CheckBoxBorderBrush" Color="#868E99" po:Freeze="True" />
     <SolidColorBrush x:Key="RowHoverBrush" Color="#F3F6FA" po:Freeze="True" />
-    <SolidColorBrush x:Key="RowSelectedBrush" Color="#E1EAFD" po:Freeze="True" />
+    <!--
+        Selected row: a light fill with a 3 px accent bar at its left edge. The fill alone is too close to
+        white to show the selection (1.2:1); the bar has 4.3:1 against the fill and 5.2:1 against white.
+    -->
+    <LinearGradientBrush x:Key="RowSelectedBrush" MappingMode="Absolute" StartPoint="0,0" EndPoint="3,0" po:Freeze="True">
+        <GradientStop Color="#2563EB" Offset="0" />
+        <GradientStop Color="#2563EB" Offset="1" />
+        <GradientStop Color="#E1EAFD" Offset="1" />
+    </LinearGradientBrush>
     <SolidColorBrush x:Key="RowAlternateBrush" Color="#FAFBFC" po:Freeze="True" />
 
     <!-- Banners -->
@@ -49,10 +61,10 @@
     <SolidColorBrush x:Key="ErrorBannerTextBrush" Color="#991B1B" po:Freeze="True" />
 
     <!-- Status colours -->
-    <SolidColorBrush x:Key="StatusGreenBrush" Color="#16A34A" po:Freeze="True" />
+    <SolidColorBrush x:Key="StatusGreenBrush" Color="#15803D" po:Freeze="True" />
     <SolidColorBrush x:Key="StatusGreyBrush" Color="#8A929C" po:Freeze="True" />
     <SolidColorBrush x:Key="StatusRedBrush" Color="#DC2626" po:Freeze="True" />
-    <SolidColorBrush x:Key="StatusAmberBrush" Color="#D97706" po:Freeze="True" />
+    <SolidColorBrush x:Key="StatusAmberBrush" Color="#B45309" po:Freeze="True" />
 
     <!-- Converters -->
     <conv:VisibleWhenConverter x:Key="VisibleWhen" />
@@ -67,6 +79,17 @@
             <Setter.Value>
                 <ControlTemplate>
                     <Border Margin="-2" BorderBrush="{StaticResource AccentBrush}" BorderThickness="2" CornerRadius="7" SnapsToDevicePixels="True" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Keyboard focus in the data grids: the same ring drawn inside, as cells sit edge to edge -->
+    <Style x:Key="GridFocusRing">
+        <Setter Property="Control.Template">
+            <Setter.Value>
+                <ControlTemplate>
+                    <Border BorderBrush="{StaticResource AccentBrush}" BorderThickness="2" CornerRadius="3" SnapsToDevicePixels="True" />
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
@@ -167,7 +190,7 @@
         <Setter Property="Padding" Value="6" />
     </Style>
 
-    <!-- Toggle: an accent tint and border make the checked state obvious -->
+    <!-- Toggle: an accent tint and a solid accent border (5.2:1 against the toolbar) make the checked state obvious -->
     <Style x:Key="ToolbarToggle" TargetType="ToggleButton">
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="Background" Value="Transparent" />
@@ -194,7 +217,7 @@
                         </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="Chrome" Property="Background" Value="{StaticResource AccentSubtleBrush}" />
-                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource AccentSubtleBorderBrush}" />
+                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
                             <Setter Property="Foreground" Value="{StaticResource AccentHoverBrush}" />
                         </Trigger>
                         <MultiTrigger>
@@ -275,7 +298,8 @@
     <Style x:Key="OptionCheckBox" TargetType="CheckBox">
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="Background" Value="{StaticResource PanelBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}" />
+        <!-- The box outline is all that shows an unticked box, so it keeps 3:1 against the panel. -->
+        <Setter Property="BorderBrush" Value="{StaticResource CheckBoxBorderBrush}" />
         <Setter Property="Padding" Value="9,0,0,0" />
         <Setter Property="Margin" Value="2,3" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
@@ -508,7 +532,8 @@
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="Padding" Value="8,0" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <!-- Arrow keys move keyboard focus from cell to cell; the ring shows where it is. -->
+        <Setter Property="FocusVisualStyle" Value="{StaticResource GridFocusRing}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="DataGridCell">
@@ -520,10 +545,36 @@
         </Setter>
     </Style>
 
+    <!--
+        Names for screen readers. A cell without a name is announced as "Item: <row view model class>,
+        Column Display Index: n", and so is any cell of a template column: UI Automation cannot read text
+        out of a cell template.
+    -->
+    <Style x:Key="TextCell" TargetType="DataGridCell" BasedOn="{StaticResource GridCell}">
+        <Style.Triggers>
+            <!-- Zero counts and absent sizes are shown as empty cells. -->
+            <DataTrigger Binding="{Binding Content.(TextBlock.Text), RelativeSource={RelativeSource Self}, TargetNullValue=''}" Value="">
+                <Setter Property="AutomationProperties.Name" Value="blank" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="OperationCell" TargetType="DataGridCell" BasedOn="{StaticResource GridCell}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding OperationText, Mode=OneWay}" />
+    </Style>
+
+    <Style x:Key="PathCell" TargetType="DataGridCell" BasedOn="{StaticResource GridCell}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding Path, Mode=OneWay}" />
+    </Style>
+
+    <Style x:Key="StatusCell" TargetType="DataGridCell" BasedOn="{StaticResource GridCell}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding StatusText, Mode=OneWay}" />
+    </Style>
+
     <!-- Row background comes from the grid (alternating) unless a trigger below applies. -->
     <Style x:Key="GridRow" TargetType="DataGridRow">
         <Setter Property="SnapsToDevicePixels" Value="True" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource GridFocusRing}" />
         <Style.Triggers>
             <Trigger Property="IsMouseOver" Value="True">
                 <Setter Property="Background" Value="{StaticResource RowHoverBrush}" />
@@ -534,12 +585,56 @@
         </Style.Triggers>
     </Style>
 
+    <!-- Each table's rows name themselves for screen readers; otherwise the row view model's class name is read. -->
     <Style x:Key="ActivityRow" TargetType="DataGridRow" BasedOn="{StaticResource GridRow}">
+        <Setter Property="AutomationProperties.Name">
+            <Setter.Value>
+                <MultiBinding StringFormat="{}{0} {1}, {2}, {3}">
+                    <Binding Path="OperationText" Mode="OneWay" />
+                    <Binding Path="FileName" Mode="OneWay" />
+                    <Binding Path="ProcessName" Mode="OneWay" />
+                    <Binding Path="TimeText" Mode="OneWay" />
+                </MultiBinding>
+            </Setter.Value>
+        </Setter>
         <Style.Triggers>
             <DataTrigger Binding="{Binding IsFailed}" Value="True">
                 <Setter Property="Foreground" Value="{StaticResource FailedBrush}" />
+                <Setter Property="AutomationProperties.Name">
+                    <Setter.Value>
+                        <MultiBinding StringFormat="{}{0} {1} failed, {2}, {3}">
+                            <Binding Path="OperationText" Mode="OneWay" />
+                            <Binding Path="FileName" Mode="OneWay" />
+                            <Binding Path="ProcessName" Mode="OneWay" />
+                            <Binding Path="TimeText" Mode="OneWay" />
+                        </MultiBinding>
+                    </Setter.Value>
+                </Setter>
             </DataTrigger>
         </Style.Triggers>
+    </Style>
+
+    <Style x:Key="FileRow" TargetType="DataGridRow" BasedOn="{StaticResource GridRow}">
+        <Setter Property="AutomationProperties.Name">
+            <Setter.Value>
+                <MultiBinding StringFormat="{}{0}, {1}, {2}">
+                    <Binding Path="FileName" Mode="OneWay" />
+                    <Binding Path="StatusText" Mode="OneWay" />
+                    <Binding Path="Folder" Mode="OneWay" />
+                </MultiBinding>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ProcessRow" TargetType="DataGridRow" BasedOn="{StaticResource GridRow}">
+        <Setter Property="AutomationProperties.Name">
+            <Setter.Value>
+                <MultiBinding StringFormat="{}{0}, PID {1}">
+                    <Binding Path="ProcessName" Mode="OneWay" />
+                    <Binding Path="ProcessId" Mode="OneWay" />
+                </MultiBinding>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style x:Key="DataGridStyle" TargetType="DataGrid">
@@ -570,9 +665,10 @@
         <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
         <Setter Property="KeyboardNavigation.TabNavigation" Value="Once" />
         <Setter Property="ColumnHeaderStyle" Value="{StaticResource GridColumnHeader}" />
-        <Setter Property="CellStyle" Value="{StaticResource GridCell}" />
+        <Setter Property="CellStyle" Value="{StaticResource TextCell}" />
         <Setter Property="RowStyle" Value="{StaticResource GridRow}" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <!-- Tab can put focus on the grid itself, before any cell is current; the ring shows that too. -->
+        <Setter Property="FocusVisualStyle" Value="{StaticResource GridFocusRing}" />
     </Style>
 
     <Style x:Key="CellText" TargetType="TextBlock">
