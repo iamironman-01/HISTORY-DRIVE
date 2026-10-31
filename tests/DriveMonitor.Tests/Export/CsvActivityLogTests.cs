@@ -142,6 +142,32 @@ public sealed class CsvActivityLogTests
         Assert.Equal(Event(count - 1).Path, records[^1][2]);
     }
 
+    [Fact]
+    public void AfterAWriteError_EveryUnwrittenAndLaterEventIsCountedAsDropped()
+    {
+        using var destination = new PipeDestination();
+        destination.StartReading();
+        var log = new CsvActivityLog(destination.FilePath);
+        log.Write(Event(0));
+        Assert.True(SpinWait.SpinUntil(() => log.Written == 1, TimeSpan.FromSeconds(5)), "the first event was not written");
+
+        destination.Disconnect(); // the drive is removed: the next write fails
+        log.Write(Event(1));
+        Assert.True(SpinWait.SpinUntil(() => log.Error is not null, TimeSpan.FromSeconds(5)), "the write error was not reported");
+        for (int i = 2; i < 1_002; i++)
+            log.Write(Event(i));
+
+        // Counted at once, while the log is still open: nothing waits in memory for a pump that has stopped.
+        Assert.IsAssignableFrom<IOException>(log.Error);
+        Assert.Equal(1L, log.Written);
+        Assert.Equal(1_001L, log.Dropped);
+
+        log.Dispose();
+
+        Assert.Equal(1L, log.Written);
+        Assert.Equal(1_001L, log.Dropped);
+    }
+
     /// <summary>Reads the file while the log may still hold it open for writing.</summary>
     private static byte[] ReadShared(string path)
     {
@@ -211,6 +237,14 @@ public sealed class CsvActivityLogTests
                     // The test stopped reading.
                 }
             });
+        }
+
+        /// <summary>The drive goes away: the log's next write fails.</summary>
+        public void Disconnect()
+        {
+            _stop.Cancel();
+            _reader.Wait(TimeSpan.FromSeconds(5));
+            _server.Dispose();
         }
 
         /// <summary>Waits until the log has closed its end, then returns everything it wrote.</summary>

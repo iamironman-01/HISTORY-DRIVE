@@ -76,8 +76,11 @@ public sealed class CsvActivityLog : IDisposable
     /// <summary>Events that will never reach the file: the log was full or closed, or gave up on a stalled drive.</summary>
     public long Dropped => Interlocked.Read(ref _dropped);
 
-    /// <summary>The write error that stopped the log (e.g. its drive was removed), if any.</summary>
-    public Exception? Error => _error ?? _pump.Exception?.GetBaseException();
+    /// <summary>
+    /// The write error that stopped the log (e.g. its drive was removed), if any. Once it is set, every
+    /// earlier event is counted as written or dropped, and later events are counted as dropped.
+    /// </summary>
+    public Exception? Error => _error;
 
     /// <summary>How long <see cref="Dispose"/> waits without the log making progress before it gives up on the rest.</summary>
     internal TimeSpan StallTimeout { get; set; } = TimeSpan.FromSeconds(5);
@@ -129,6 +132,7 @@ public sealed class CsvActivityLog : IDisposable
     {
         ChannelReader<FileActivityEvent> reader = _channel.Reader;
         CancellationToken abandon = _abandon.Token;
+        Exception? error = null;
         try
         {
             while (await reader.WaitToReadAsync(abandon).ConfigureAwait(false))
@@ -145,14 +149,25 @@ public sealed class CsvActivityLog : IDisposable
         }
         catch (OperationCanceledException) when (abandon.IsCancellationRequested)
         {
-            // Dispose gave up on a stalled drive: whatever was not written yet never will be.
-            _error = new TimeoutException("The drive stopped accepting the activity log; events not yet written were dropped.");
-            Interlocked.Add(ref _dropped, _bufferedRows);
-            DropQueued();
+            // Dispose gave up on a stalled drive.
+            error = new TimeoutException("The drive stopped accepting the activity log; events not yet written were dropped.");
+        }
+        catch (Exception ex)
+        {
+            // Disk full, drive removed, network share gone: the log ends here.
+            error = ex;
         }
         finally
         {
+            // Nothing more will be written. Refuse new events, so Write counts them as dropped, and count
+            // the rows that were buffered or queued.
+            _channel.Writer.TryComplete();
+            Interlocked.Add(ref _dropped, _bufferedRows);
+            DropQueued();
             CloseFile();
+
+            // Last, so a caller that sees the error also sees the final counts.
+            _error = error;
         }
     }
 
@@ -204,7 +219,7 @@ public sealed class CsvActivityLog : IDisposable
         }
         catch (AggregateException)
         {
-            return true; // the pump failed earlier; Error has the reason
+            return true; // the pump records its own errors in Error; this only keeps Dispose from throwing
         }
     }
 
