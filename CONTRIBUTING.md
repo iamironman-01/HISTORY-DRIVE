@@ -35,12 +35,15 @@ dotnet test tests/DriveMonitor.Tests/DriveMonitor.Tests.csproj --no-build -nolog
   need no elevation. `MonitorEngineSinkTests` drives the engine through `IFileIoSink`, the interface the
   ETW source calls. A few tests (`DriveCatalogLiveTests`, `StorageQueryLiveTests`, `NativeMethodsTests`)
   call the real Windows APIs against the test machine's own drives and process; they need no
-  administrator rights either. The test project references only the engine; the app and the CLI have no
-  unit tests.
+  administrator rights either. The test project also references the app and the CLI, which expose their
+  internals to it: the app's view models, settings and single-instance check, and the CLI's options, drive
+  watcher, console text, CSV start and self-test folder have tests too.
 - Test folders mirror the engine's namespaces (`Tracing`, `Volumes`, `Aggregation`, `Export`, `Filtering`,
-  `Models`). `TestSupport` has `TempDirectory` (a temporary folder deleted on dispose), `CultureScope` (runs
-  code under a given culture, including one that formats visibly differently from the invariant culture)
-  and `Rfc4180` (a strict CSV reader for checking what the CSV writer produced).
+  `Models`, `IO`, `Interop`), with `App` and `Cli` for the front ends. `TestSupport` has `TempDirectory` (a
+  temporary folder deleted on dispose), `CultureScope` (runs code under a given culture, including one that
+  formats visibly differently from the invariant culture), `Rfc4180` (a strict CSV reader for checking what
+  the CSV writer produced) and `FileLinks` (plants junctions, hard links and, where Windows allows it,
+  symbolic links).
 - Test classes are `public sealed class <Subject>Tests` with a `/// <summary>` saying what they cover, and
   test names usually read `Method_Condition_Result`, for example
   `Complete_LoggedBeforeTheBegin_DoesNotMatch`.
