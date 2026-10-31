@@ -14,6 +14,7 @@ public sealed partial class MainViewModel
 
     private readonly Dictionary<char, DriveItemViewModel> _drivesByLetter = new();
     private readonly DispatcherTimer _driveTimer;
+    private readonly DriveArrivals _arrivals;
     private bool _driveListRequested;
     private bool _driveRefreshRunning;
     private bool _driveRefreshPending;
@@ -21,6 +22,22 @@ public sealed partial class MainViewModel
 
     /// <summary>Every drive letter seen since start, sorted; removed drives stay with IsConnected = false.</summary>
     public ObservableCollection<DriveItemViewModel> Drives { get; } = [];
+
+    /// <summary>
+    /// Called by the window as soon as Windows reports new drive letters, before <see cref="OnVolumesChanged"/>:
+    /// the new letters are monitored at once when "Monitor new USB drives automatically" applies to them.
+    /// </summary>
+    public void OnVolumesArrived(IReadOnlyList<char> letters)
+    {
+        if (_disposed)
+            return;
+
+        // Kernel paths on the new volume map to its letter only once the volume map knows it, and the map's own
+        // refresh after a miss runs at most every 2 s. It is 26 QueryDosDevice calls, quick enough for the UI thread.
+        _engine.Volumes.Refresh();
+        if (_driveListRequested && _settings.AutoMonitorNewDrives)
+            _arrivals.Arrived(letters, _drivesByLetter);
+    }
 
     /// <summary>Called by the window when Windows reports that a volume arrived or was removed.</summary>
     public void OnVolumesChanged()
@@ -51,6 +68,7 @@ public sealed partial class MainViewModel
             {
                 VolumeMapper volumes = _engine.Volumes;
                 bool refresh = refreshVolumes;
+                long arrivalsAtStart = _arrivals.Count;
                 IReadOnlyList<DriveDescriptor> found = await Task.Run(() =>
                 {
                     // First, so that file names on a pendrive that just arrived map to its letter.
@@ -61,7 +79,7 @@ public sealed partial class MainViewModel
                 if (_disposed)
                     return;
 
-                MergeDrives(found, initial);
+                MergeDrives(found, initial, arrivalsAtStart);
                 CloseBanner(BannerKeys.Drives);
 
                 again = _driveRefreshPending;
@@ -83,7 +101,7 @@ public sealed partial class MainViewModel
         }
     }
 
-    private void MergeDrives(IReadOnlyList<DriveDescriptor> found, bool initial)
+    private void MergeDrives(IReadOnlyList<DriveDescriptor> found, bool initial, long arrivalsAtStart)
     {
         var present = new HashSet<char>();
         foreach (DriveDescriptor drive in found)
@@ -113,6 +131,7 @@ public sealed partial class MainViewModel
                 item.MarkDisconnected();
         }
 
+        _arrivals.Enumerated(arrivalsAtStart, present, _drivesByLetter);
         OnPropertyChanged(nameof(StateText));
     }
 
@@ -126,8 +145,9 @@ public sealed partial class MainViewModel
         DriveDescriptor drive = item.Descriptor;
         if (!drive.IsExternal)
         {
-            if (isNew)
-                item.SetMonitored(DefaultMonitoring(drive));
+            // Pushed to the drive filter even when the choice stays: if an external drive used this letter last time,
+            // the letter was monitored on arrival.
+            item.SetMonitored(isNew ? DefaultMonitoring(drive) : item.IsMonitored);
             return;
         }
 

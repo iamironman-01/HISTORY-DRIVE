@@ -74,6 +74,7 @@ public partial class MainWindow : Window
     {
         base.OnSourceInitialized(e);
         _deviceWatcher = new DeviceChangeWatcher(this);
+        _deviceWatcher.VolumesArrived += OnVolumesArrived;
         _deviceWatcher.VolumesChanged += OnVolumesChanged;
     }
 
@@ -112,6 +113,8 @@ public partial class MainWindow : Window
             _viewModel.ReportBackgroundError(ex);
         }
     }
+
+    private void OnVolumesArrived(object? sender, IReadOnlyList<char> letters) => _viewModel.OnVolumesArrived(letters);
 
     private void OnVolumesChanged(object? sender, EventArgs e) => _viewModel.OnVolumesChanged();
 

@@ -77,6 +77,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _isElevated = MonitorEngine.IsElevated;
         _engine = new MonitorEngine(new MonitorOptions());
         _engine.Options.ExcludeOwnProcess = settings.HideOwnActivity;
+        _arrivals = new DriveArrivals(_engine.Drives);
 
         ApplyFilterSettings();
         Activity = new ActivityFeed(_filter.AcceptsActivity, settings.MaxRows) { GroupRepeated = settings.GroupRepeated };
