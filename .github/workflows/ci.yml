@@ -46,7 +46,8 @@ jobs:
       - name: Summarize tests and coverage
         if: always()
         shell: pwsh
-        run: ./.github/scripts/Write-TestSummary.ps1 -ResultsDirectory TestResults
+        # DriveMonitor.Core is at 64.8 % line coverage; the floor catches regressions, not today's code.
+        run: ./.github/scripts/Write-TestSummary.ps1 -ResultsDirectory TestResults -MinimumLineCoverage 60
 
       - name: Upload test results
         if: always()
