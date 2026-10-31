@@ -76,7 +76,7 @@ internal static class FileIoClassifier
                 {
                     IoStatus.Success => TransferredBytes(io),
                     IoStatus.Failed => 0,
-                    _ => Math.Max(io.IoSize, 0),
+                    _ => io.IoSize,
                 };
                 break;
 
@@ -241,11 +241,10 @@ internal static class FileIoClassifier
 
     private static long TransferredBytes(PendingIo io)
     {
-        // Completion Information = bytes transferred; it can never exceed the request.
-        ulong transferred = io.CompletionInfo;
-        if (io.IoSize > 0 && transferred > (ulong)io.IoSize)
-            transferred = (ulong)io.IoSize;
-        return transferred > int.MaxValue ? int.MaxValue : (long)transferred;
+        // Completion Information = bytes transferred; it can never exceed the request, nor, when no request
+        // size was recorded, the most a single request can ask for (a ULONG).
+        ulong limit = io.IoSize > 0 ? (ulong)io.IoSize : uint.MaxValue;
+        return (long)Math.Min(io.CompletionInfo, limit);
     }
 
     /// <summary>Statuses that end an operation normally even though NT_SUCCESS is false.</summary>

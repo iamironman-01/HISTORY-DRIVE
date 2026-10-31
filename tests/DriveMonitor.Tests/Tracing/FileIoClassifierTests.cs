@@ -87,13 +87,15 @@ public sealed class FileIoClassifierTests
     // ---- read / write ----
 
     [Theory]
-    [InlineData(4096UL, 4096, 4096L)] // full transfer
-    [InlineData(100UL, 4096, 100L)] // short read at the end of the file
-    [InlineData(0UL, 4096, 0L)] // read at the end of the file
-    [InlineData(8192UL, 4096, 4096L)] // never more than requested
-    [InlineData(512UL, 0, 512L)] // no request size known: trust the completion
-    [InlineData(5_000_000_000UL, 0, 2_147_483_647L)] // capped at int.MaxValue
-    public void ReadWrite_Success_ReportsTheTransferredBytes(ulong info, int ioSize, long expected)
+    [InlineData(4096UL, 4096L, 4096L)] // full transfer
+    [InlineData(100UL, 4096L, 100L)] // short read at the end of the file
+    [InlineData(0UL, 4096L, 0L)] // read at the end of the file
+    [InlineData(8192UL, 4096L, 4096L)] // never more than requested
+    [InlineData(512UL, 0L, 512L)] // no request size known: trust the completion
+    [InlineData(5_000_000_000UL, 0L, 4_294_967_295L)] // ... up to the most one request can ask for (a ULONG)
+    [InlineData(3_221_225_472UL, 3_221_225_472L, 3_221_225_472L)] // a 3 GiB request is not clamped to 2 GiB
+    [InlineData(5_000_000_000UL, 4_294_967_295L, 4_294_967_295L)] // the largest request
+    public void ReadWrite_Success_ReportsTheTransferredBytes(ulong info, long ioSize, long expected)
     {
         foreach (RawFileOp op in new[] { RawFileOp.Read, RawFileOp.Write })
         {
@@ -126,18 +128,43 @@ public sealed class FileIoClassifierTests
     }
 
     [Theory]
-    [InlineData(65536, 65536L)]
-    [InlineData(0, 0L)]
-    [InlineData(-1, 0L)]
-    public void ReadWrite_NoCompletion_ReportsTheRequestedSize(int ioSize, long expected)
+    [InlineData(65536L)]
+    [InlineData(0L)]
+    [InlineData(3_221_225_472L)] // 3 GiB
+    [InlineData(4_294_967_295L)] // the largest request (a ULONG)
+    public void ReadWrite_NoCompletion_ReportsTheRequestedSize(long ioSize)
     {
-        PendingIo io = Io(RawFileOp.Read);
-        io.IoSize = ioSize;
+        foreach (RawFileOp op in new[] { RawFileOp.Read, RawFileOp.Write })
+        {
+            PendingIo io = Io(op);
+            io.IoSize = ioSize;
 
-        FileActivityEvent ev = Classify(io);
+            FileActivityEvent ev = Classify(io);
 
-        Assert.Equal(IoStatus.Unknown, ev.Status);
-        Assert.Equal(expected, ev.Bytes);
+            Assert.Equal(IoStatus.Unknown, ev.Status);
+            Assert.Equal(ioSize, ev.Bytes);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, 0L)]
+    [InlineData(65536, 65536L)]
+    [InlineData(int.MaxValue, 2_147_483_647L)]
+    [InlineData(int.MinValue, 2_147_483_648L)] // 2 GiB, which TraceEvent returns as int.MinValue
+    [InlineData(-1_073_741_824, 3_221_225_472L)] // 3 GiB
+    [InlineData(-1, 4_294_967_295L)] // the largest request
+    public void RequestSize_ReadsTheTracedIntAsTheKernelsUnsignedLength(int traced, long expected)
+    {
+        Assert.Equal(expected, PendingIo.RequestSize(traced));
+    }
+
+    [Fact]
+    public void ReadWrite_RequestOf2GiBOrMore_KeepsItsSizeFromTraceToEvent()
+    {
+        PendingIo io = Completed(Io(RawFileOp.Write), status: 0, info: 3_221_225_472);
+        io.IoSize = PendingIo.RequestSize(-1_073_741_824); // a 3 GiB WriteFile, as TraceEvent returns it
+
+        Assert.Equal(3_221_225_472L, Classify(io).Bytes);
     }
 
     [Theory]
