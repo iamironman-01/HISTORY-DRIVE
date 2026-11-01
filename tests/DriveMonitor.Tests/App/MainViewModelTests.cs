@@ -42,6 +42,7 @@ public sealed class MainViewModelTests : IDisposable
     private readonly ManualResetEventSlim _atLastStep = new();
     private readonly ManualResetEventSlim _release = new();
     private readonly ManualResetEventSlim _releaseStart = new();
+    private readonly ManualResetEventSlim _releaseLog = new();
     private int _lastSteps;
 
     public MainViewModelTests()
@@ -51,14 +52,16 @@ public sealed class MainViewModelTests : IDisposable
 
     public void Dispose()
     {
-        // A test that held the shutdown or a start and failed before letting it go.
+        // A test that held the shutdown, a start or a log and failed before letting it go.
         _release.Set();
         _releaseStart.Set();
+        _releaseLog.Set();
         _ui.Invoke(_viewModel.ShutDownAsync).Wait(Timeout);
         _ui.Dispose();
         _atLastStep.Dispose();
         _release.Dispose();
         _releaseStart.Dispose();
+        _releaseLog.Dispose();
     }
 
     [Fact]
@@ -242,6 +245,44 @@ public sealed class MainViewModelTests : IDisposable
         Assert.Contains(Event.Path, File.ReadAllText(log.FilePath), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task ShutDownAsync_WhileRecordLogIsStillSavingTheLog_WaitsForIt()
+    {
+        using var temp = new TempDirectory();
+        using var writing = new ManualResetEventSlim();
+        MonitorEngine engine = _viewModel.Engine;
+        engine.Options.MinLogFreeSpaceMB = 1; // so that the log checks the free space before it writes
+        engine.StartLog(temp.PathOf("activity.csv"));
+        CsvActivityLog log = engine.Log!;
+        log.StallTimeout = Timeout;
+
+        // A slow drive: the log's first write waits until the test lets it go.
+        log.FreeSpaceProbe = _ =>
+        {
+            writing.Set();
+            _releaseLog.Wait();
+            return long.MaxValue;
+        };
+        log.Write(Event);
+        Assert.True(writing.Wait(Timeout), "the log did not start writing");
+
+        // Record log is turned off: from now on the log is no longer the engine's, and it is still being saved.
+        _ui.Invoke(() => _viewModel.ToggleLogCommand.Execute(null));
+        long writtenAtLastStep = -1;
+        HoldShutDown(() => writtenAtLastStep = log.Written);
+
+        Task shutDown = _ui.Invoke(_viewModel.ShutDownAsync);
+
+        Assert.StartsWith("Saving the activity log", Assert.Single(Banners()).Message, StringComparison.Ordinal);
+        Assert.False(_atLastStep.Wait(Briefly), "the shutdown went on while Record log was still saving its log");
+
+        _releaseLog.Set();
+        Assert.True(_atLastStep.Wait(Timeout), "the shutdown did not go on once the log was saved");
+        Assert.Equal(1L, writtenAtLastStep);
+        _release.Set();
+        await shutDown.WaitAsync(Timeout);
+    }
+
     private List<BannerViewModel> Banners() => _ui.Invoke(() => _viewModel.Banners.ToList());
 
     /// <summary>Collects, on the UI thread, every banner shown from now on, also one closed again since.</summary>
@@ -265,12 +306,16 @@ public sealed class MainViewModelTests : IDisposable
         return log;
     }
 
-    /// <summary>Holds the shutdown at its last step, where the log is saved, until <see cref="_release"/> is set.</summary>
-    private void HoldShutDown()
+    /// <summary>
+    /// Holds the shutdown at its last step, where the log is saved, until <see cref="_release"/> is set; first runs
+    /// <paramref name="atLastStep"/> there.
+    /// </summary>
+    private void HoldShutDown(Action? atLastStep = null)
     {
         Action disposeEngine = _viewModel.DisposeEngine;
         _viewModel.DisposeEngine = () =>
         {
+            atLastStep?.Invoke();
             Interlocked.Increment(ref _lastSteps);
             _atLastStep.Set();
             _release.Wait();
