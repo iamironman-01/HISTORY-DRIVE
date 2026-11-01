@@ -97,6 +97,22 @@ public sealed class MainViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task StartAsync_ShowsTheWarningOfTheStart()
+    {
+        _viewModel.StartEngine = () => Warning; // a start that went ahead without the guard, with no kernel session
+        List<BannerViewModel> shown = ShownBanners();
+
+        await _ui.Invoke(_viewModel.StartAsync).WaitAsync(Timeout);
+
+        // Shown once the start is over. (Here the engine itself never ran, so the state then went back to Stopped
+        // and took the warning away again, as it does when monitoring stops.)
+        BannerViewModel banner = Assert.Single(_ui.Invoke(() => shown.ToList()));
+        Assert.Equal(BannerKind.Warning, banner.Kind);
+        Assert.Equal(Warning, banner.Message);
+        Assert.Null(banner.ExpiresAtTick);
+    }
+
+    [Fact]
     public async Task TryClose_WhileTheLogIsSaved_KeepsTheWindowOpenWithoutBlockingTheUiThread()
     {
         using var temp = new TempDirectory();
@@ -189,6 +205,14 @@ public sealed class MainViewModelTests : IDisposable
     }
 
     private List<BannerViewModel> Banners() => _ui.Invoke(() => _viewModel.Banners.ToList());
+
+    /// <summary>Collects, on the UI thread, every banner shown from now on, also one closed again since.</summary>
+    private List<BannerViewModel> ShownBanners()
+    {
+        var shown = new List<BannerViewModel>();
+        _ui.Invoke(() => _viewModel.Banners.CollectionChanged += (_, e) => shown.AddRange(e.NewItems?.OfType<BannerViewModel>() ?? []));
+        return shown;
+    }
 
     private bool CanExecute(ICommand command) => _ui.Invoke(() => command.CanExecute(null));
 

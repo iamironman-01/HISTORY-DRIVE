@@ -111,6 +111,11 @@ public sealed partial class MainViewModel : ObservableObject
         _engine.StateChanged += OnEngineStateChanged;
         _engine.Faulted += OnEngineFaulted;
         _engine.Restarted += OnEngineRestarted;
+        StartEngine = () =>
+        {
+            _engine.Start();
+            return _engine.StartWarning;
+        };
         DisposeEngine = _engine.Dispose;
 
         _tickTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = TickInterval };
@@ -132,6 +137,12 @@ public sealed partial class MainViewModel : ObservableObject
 
     /// <summary>The settings object that is saved on exit; the window stores its bounds here.</summary>
     public AppSettings Settings => _settings;
+
+    /// <summary>
+    /// A start, on the thread pool: <see cref="MonitorEngine.Start"/>, then what it worked around
+    /// (<see cref="MonitorEngine.StartWarning"/>). Tests replace it to start no kernel session.
+    /// </summary>
+    internal Func<string?> StartEngine { get; set; }
 
     /// <summary>
     /// The last step of the shutdown, on the thread pool: <see cref="MonitorEngine.Dispose"/>, which ends the activity log
@@ -761,7 +772,8 @@ public sealed partial class MainViewModel : ObservableObject
             _ = StartAsync();
     }
 
-    private async Task StartAsync()
+    /// <summary>Starts monitoring: Start, auto-start, and the banners' "Try again" and "Start again".</summary>
+    internal async Task StartAsync()
     {
         if (_isBusy || _disposed || _engine.IsRunning)
             return;
@@ -771,12 +783,12 @@ public sealed partial class MainViewModel : ObservableObject
         CloseBanner(BannerKeys.Faulted);
         try
         {
-            Task start = Task.Run(_engine.Start);
+            Task<string?> start = Task.Run(StartEngine);
             _lifecycleTask = start;
-            await start;
+            string? warning = await start;
             _lastError = null;
             if (!_disposed)
-                ShowStartWarning(_engine.StartWarning);
+                ShowStartWarning(warning);
         }
         catch (MonitorStartException ex)
         {
