@@ -25,7 +25,7 @@ self-test checks the most important of them on a real kernel.
 | `ActivityAggregator` | `Aggregation/ActivityAggregator.cs` | Totals per file, per drive and per process |
 | `FolderTracker` | `Aggregation/FolderTracker.cs` | The paths known to be folders, which give a folder's delete or rename the `Directory` flag |
 | `CsvActivityLog`, `Csv` | `Export/` | The continuous CSV log, with its limits, and CSV export |
-| `LinkSafeFolder` | `IO/LinkSafeFolder.cs` | Writes and deletes files in a folder without following links (the app's settings and error log, the activity log) |
+| `LinkSafeFolder` | `IO/LinkSafeFolder.cs` | Opens a folder, or the folders below a trusted root, and the files in it without following links (the app's settings, error log and logs folder, the activity log) |
 
 Paths are relative to `src/DriveMonitor.Core`.
 
@@ -457,9 +457,17 @@ channel of 100,000 events, or is counted in `Dropped` when the channel is full o
   deleted: each of the app's recordings has its own timestamped name, and parts left by an earlier `drivemon`
   run with the same `--csv` path stay until a new part of the same name replaces them.
 - **Links.** The log runs as administrator, often in a folder that other users can change (the root of a
-  pendrive, a shared folder) and under names they can predict, so it opens no file by path. The constructor
-  creates a missing folder (`Directory.CreateDirectory`), then opens it once with `LinkSafeFolder.Open`, which
-  refuses a junction, symbolic link or other reparse point at the folder itself, and holds that handle without
+  pendrive, a shared folder) and under names they can predict, so it opens no file by path. Given a trusted
+  root (`trustedRoot`, the last parameter of the constructor and of `StartLog`; the app passes
+  `%LOCALAPPDATA%`), the file must be below it, or the constructor throws `ArgumentException` (*'\<file>' is
+  not in '\<root>'.*) before the free-space check and before any folder is created or opened. The folder is
+  then opened, and created when missing, with `LinkSafeFolder.OpenBelow`, which follows no link below the
+  root (see [Front ends](#front-ends)): a junction, symbolic link or mount point on the way, such as
+  `%LOCALAPPDATA%\DriveMonitor`, makes it throw an `IOException` that names it. Without a root
+  (`drivemon --csv`, a path the user chose), the constructor creates a missing folder by path
+  (`Directory.CreateDirectory`) and opens it with `LinkSafeFolder.Open`, which refuses a junction, symbolic
+  link or other reparse point at the folder itself; links in the folders above it are followed, so they
+  decide which folder the log opens. Either way the log holds the folder's handle without
   `FILE_SHARE_DELETE` until the background task ends, on `Dispose` or on an error: meanwhile nobody can
   rename, delete or replace the folder, not even between two parts. Each part is opened relative to that
   handle with `FILE_OPEN_REPARSE_POINT` (`FileMode.OpenOrCreate`); a file already at the name must be a plain
@@ -468,9 +476,8 @@ channel of 100,000 events, or is counted in `Dropped` when the channel is full o
   file with more than one name is refused: for the first part the constructor, and so `StartLog`, throws an
   `IOException` that names the file, such as *'E:\log.csv' has other names (hard links); it is not used.*;
   for a later part the log stops with that error. A path that ends in a backslash, or a drive root, is
-  refused with *'\<path>' is a folder, not a file.* Junctions in the folders above the log's folder are
-  followed: they decide which folder the log opens, and that folder is then checked as above. FAT and exFAT
-  have neither reparse points nor hard links; on a network share the checks rest on the server.
+  refused with *'\<path>' is a folder, not a file.* FAT and exFAT have neither reparse points nor hard links;
+  on a network share the checks rest on the server.
 - **Free space.** The constructor throws `IOException`, and creates no file, when the log's drive has less
   than `MinLogFreeSpaceMB` (512 MB) free. While logging, the free space is checked at most once a second and
   before every new part; below the minimum the log stops with an `IOException` in `Error` (its `HResult` is
@@ -560,8 +567,11 @@ the log (up to 30 seconds on a slow drive; see [Activity log](#activity-log)). A
 afterwards throws `ObjectDisposedException`, so a start racing with `Dispose` (for example the window closing
 while auto-start is still creating the session) cannot leave a kernel session that nothing would stop. A
 faulted session is never restarted once the engine is disposed, and calling `Dispose` again is harmless.
-`StartLog` has no such check: a log started after `Dispose` has ended the current one stays open, with its
-header only, until the process ends.
+`StartLog` also throws `ObjectDisposedException` once the engine is disposed, before it creates anything. A
+log that it is still creating when `Dispose` runs (for example when the window closes while **Record log**
+starts) does not stay open either: `Dispose` marks the engine before its own `StopLog`, and both swap the
+current log atomically, so either that `StopLog` ends the new log, or `StartLog`, which looks at the mark
+again once it has swapped the log in, ends it itself and throws `ObjectDisposedException`.
 
 ### The cross-process guard
 
@@ -669,8 +679,9 @@ takes well under those 3 seconds; events the log has not written when the proces
 still running then can leave its kernel session behind, because `Start` subscribes to `ProcessExit` only at
 its end; the next start with the same session name replaces that session.
 
-Not waited for: an export, or a **Record log** start, that is still running when the window closes. A log
-whose start finishes after the engine is disposed stays open until the process ends (see [Dispose](#dispose)).
+Not waited for: an export, or a **Record log** start, that is still running when the window closes. The log
+that such a start creates does not stay open: `Dispose` ends it, or `StartLog` closes it itself and throws
+`ObjectDisposedException` (see [Dispose](#dispose)).
 After a fatal error, `EmergencyStop` still disposes the engine on the calling thread, the UI thread included,
 because the process ends right after it and the kernel session has to be stopped first; with a log on a slow
 drive the window can stop responding for up to about 40 seconds before the error message appears.
@@ -749,27 +760,50 @@ exhaust memory or fill a drive.
   state other than Monitoring.
 
   The app runs elevated, but `%LOCALAPPDATA%\DriveMonitor` belongs to the user, so any program the user runs
-  can plant junctions and links there. `SettingsStore.TrySave` and `ErrorLog` therefore write through
-  `LinkSafeFolder`, as the activity log does (see [Activity log](#activity-log)). It checks the handles it
-  then uses rather than paths, so a link swapped in after a check gains nothing. `Open` opens the folder with
-  `FILE_FLAG_OPEN_REPARSE_POINT`, refuses it when it is a junction, symbolic link or other reparse point, and
-  keeps it open without `FILE_SHARE_DELETE`, so it cannot be renamed and replaced while in use. `OpenFile`
-  opens a name relative to that handle (`NtCreateFile` with `RootDirectory` and `FILE_OPEN_REPARSE_POINT`)
-  and refuses links, folders and files with more than one name (hard links); it has no mode that truncates a
-  file before that check, and it can give an asynchronous stream, whose writes can be cancelled. `Rename`
-  renames an open file within the folder through its handle and refuses to replace a link, a folder or a
-  hard-linked file. `DeleteFile` opens a name the same way, refuses what `OpenFile` refuses, and deletes
-  through that handle, with POSIX semantics where the file system offers them and the classic disposition
-  otherwise. A folder path of 260 characters or more is opened with the `\\?\` prefix. Where a file system
-  without reparse points rejects `FILE_OPEN_REPARSE_POINT` as an invalid parameter, the open is repeated once
-  without it, and the handle is still checked. Only the folder itself is opened without following a link:
-  junctions in the folders above it are followed. A junction at `%LOCALAPPDATA%\DriveMonitor` is therefore
-  refused for the settings and the error log, but followed on the way to `Logs`, so it decides which folder
-  **Record log** writes to. `settings.json` is written to `settings.json.tmp` and renamed over the old file;
-  `errors.log` is truncated through its open handle once it passes 1 MiB. When a check fails, the settings
-  are not saved and the error is not logged. After a failed start, `SettingsStore.TrySetAside` moves
-  `settings.json` to `settings.bad.json` by path (`File.Move`, without these checks), so that the next start
-  uses the defaults.
+  can plant junctions and links there, or put a junction in place of the folder while nothing holds it open.
+  Everything the app keeps there is therefore opened with `LinkSafeFolder.OpenBelow`, starting from
+  `SettingsStore.TrustedRoot`: `%LOCALAPPDATA%` as Windows reports it
+  (`Environment.SpecialFolder.LocalApplicationData`). That covers `SettingsStore.Load`, `TrySave` and
+  `TrySetAside`, `ErrorLog.Write`, **Record log**, which passes the root to `MonitorEngine.StartLog` (see
+  [Activity log](#activity-log)), and **Open logs folder**, whose `ShellActions.OpenFolder` creates the folder
+  that way and starts File Explorer only when that succeeds. The root is trusted: the user can redirect it
+  without administrator rights, through the value `Local AppData` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders`, and the app follows that
+  redirection but no link below it. Every name it uses there is fixed.
+
+  `LinkSafeFolder` checks the handles it then uses rather than paths, so a link swapped in after a check gains
+  nothing. `Open` opens a folder by its path with `FILE_FLAG_OPEN_REPARSE_POINT`, refuses it when it is a
+  junction, symbolic link or other reparse point, and keeps it open without `FILE_SHARE_DELETE`, so it cannot
+  be renamed and replaced while in use; links in the folders above it are followed.
+  `OpenBelow(trustedRoot, path, create)` opens the root by its path, following links, and needs only that it
+  is a folder. It then opens each folder below it relative to its parent's handle (`NtCreateFile` with
+  `RootDirectory`, `FILE_DIRECTORY_FILE` and `FILE_OPEN_REPARSE_POINT`, and `FILE_OPEN_IF` when `create` is
+  true, so that a missing folder is created in the same step), refuses it as `Open` refuses its folder, and
+  keeps each parent open, without `FILE_SHARE_DELETE`, until its child is open. The error names the first link
+  on the way, such as *'...\DriveMonitor' is a junction, symbolic link or other reparse point; it is not
+  followed.*, and a file where a folder should be gives *'\<path>' is not a folder.* A path that is not below
+  the root once `..` is resolved, that keeps a `.`, `..` or empty name (as an extended `\\?\` path does), or
+  that has a name no folder can have, throws `ArgumentException` before anything is opened; the comparison
+  ignores case and needs a separator after the root, so `LocalLow` is not below `Local`. The folder that
+  `OpenBelow` returns is held and used like one from `Open`. `OpenFile` opens a name relative to the folder's
+  handle (`NtCreateFile` with `RootDirectory` and `FILE_OPEN_REPARSE_POINT`) and refuses links, folders and
+  files with more than one name (hard links); it has no mode that truncates a file before that check, and it
+  can give an asynchronous stream, whose writes can be cancelled. `Rename` renames an open file within the
+  folder through its handle and refuses to replace a link, a folder or a hard-linked file. `DeleteFile` opens
+  a name the same way, refuses what `OpenFile` refuses, and deletes through that handle, with POSIX semantics
+  where the file system offers them and the classic disposition otherwise. A folder path of 260 characters or
+  more is opened with the `\\?\` prefix. Where a file system without reparse points rejects
+  `FILE_OPEN_REPARSE_POINT` as an invalid parameter, the open is repeated once without it, and the handle is
+  still checked.
+
+  `Load` opens `settings.json` through its folder and reads nothing it refuses: the app then starts with the
+  defaults, as for a missing or damaged file. `settings.json` is written to `settings.json.tmp` and renamed
+  over the old file; `errors.log` is truncated through its open handle once it passes 1 MiB. When a check
+  fails, the settings are not saved, the error is not logged, **Record log** shows *Could not start the
+  activity log: ...* and **Open logs folder** *Could not open the logs folder: ...*, each with the message
+  that names the link. After a failed start, `SettingsStore.TrySetAside` renames `settings.json` to
+  `settings.bad.json` through the folder with `Rename`, so that the next start uses the defaults; when that is
+  refused, it returns null, and the start-up error says nothing about moved settings.
 - **CLI.** `CliOptions` parses the arguments (`Program.cs`), `LiveMonitor` prints events and the summary,
   and `SelfTest` runs the end-to-end check. Without `--drives`, `DriveWatcher` keeps the default selection
   up to date: on each 200 ms pass it compares the drive letters that exist (`GetLogicalDrives`, which reads
