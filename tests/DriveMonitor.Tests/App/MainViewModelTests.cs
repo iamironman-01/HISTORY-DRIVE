@@ -22,6 +22,9 @@ public sealed class MainViewModelTests : IDisposable
 
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>How long a test gives something that must not happen yet the chance to happen anyway.</summary>
+    private static readonly TimeSpan Briefly = TimeSpan.FromMilliseconds(500);
+
     private static readonly FileActivityEvent Event = new()
     {
         Sequence = 1,
@@ -38,6 +41,7 @@ public sealed class MainViewModelTests : IDisposable
     private readonly MainViewModel _viewModel;
     private readonly ManualResetEventSlim _atLastStep = new();
     private readonly ManualResetEventSlim _release = new();
+    private readonly ManualResetEventSlim _releaseStart = new();
     private int _lastSteps;
 
     public MainViewModelTests()
@@ -47,11 +51,14 @@ public sealed class MainViewModelTests : IDisposable
 
     public void Dispose()
     {
-        _release.Set(); // a test that held the shutdown and failed before letting it go
+        // A test that held the shutdown or a start and failed before letting it go.
+        _release.Set();
+        _releaseStart.Set();
         _ui.Invoke(_viewModel.ShutDownAsync).Wait(Timeout);
         _ui.Dispose();
         _atLastStep.Dispose();
         _release.Dispose();
+        _releaseStart.Dispose();
     }
 
     [Fact]
@@ -184,6 +191,37 @@ public sealed class MainViewModelTests : IDisposable
 
         Assert.All(commands, command => Assert.False(CanExecute(command)));
         Assert.Equal(commands.Length, _ui.Invoke(() => changed.Count)); // so that their buttons grey out
+    }
+
+    [Fact]
+    public async Task ShutDownAsync_WhileAStartRuns_WaitsForItAndStaysStopping()
+    {
+        using var starting = new ManualResetEventSlim();
+        _viewModel.StartEngine = () =>
+        {
+            starting.Set();
+            _releaseStart.Wait();
+            return Warning;
+        };
+        Task start = _ui.Invoke(_viewModel.StartAsync);
+        Assert.True(starting.Wait(Timeout), "the start did not run");
+        HoldShutDown();
+
+        Task shutDown = _ui.Invoke(_viewModel.ShutDownAsync);
+
+        // The kernel session is stopped only after the start: one still running would create it after the stop.
+        Assert.Equal(MonitorState.Stopping, _ui.Invoke(() => _viewModel.State));
+        Assert.False(_atLastStep.Wait(Briefly), "the shutdown went on while a start was still running");
+
+        _releaseStart.Set();
+        await start.WaitAsync(Timeout);
+        Assert.True(_atLastStep.Wait(Timeout), "the shutdown did not go on after the start");
+
+        // The end of that start changes nothing on the closing window: no start warning, still stopping.
+        Assert.Equal(MonitorState.Stopping, _ui.Invoke(() => _viewModel.State));
+        Assert.Empty(Banners());
+        _release.Set();
+        await shutDown.WaitAsync(Timeout);
     }
 
     [Fact]
