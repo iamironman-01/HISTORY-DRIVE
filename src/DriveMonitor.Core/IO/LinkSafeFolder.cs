@@ -425,15 +425,21 @@ public sealed class LinkSafeFolder : IDisposable
     /// The names of the folders from <paramref name="root"/> down to <paramref name="fullPath"/>, both made by
     /// <see cref="FullFolderPath"/>: none for the root itself, null when the path is not below the root.
     /// </summary>
+    /// <remarks>
+    /// <see cref="Path.GetFullPath(string)"/> leaves an extended path (\\?\) as it is, so its '.', '..' and empty
+    /// names would reach the walk, which opens each name in turn: such a path is not below the root either.
+    /// </remarks>
     private static string[]? NamesBelow(string root, string fullPath)
     {
         if (string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase))
             return [];
 
         string prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
-        return fullPath.Length > prefix.Length && fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? fullPath[prefix.Length..].Split(Path.DirectorySeparatorChar)
-            : null;
+        if (fullPath.Length <= prefix.Length || !fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        string[] names = fullPath[prefix.Length..].Split(Path.DirectorySeparatorChar);
+        return Array.Exists(names, name => name is "" or "." or "..") ? null : names;
     }
 
     /// <summary>

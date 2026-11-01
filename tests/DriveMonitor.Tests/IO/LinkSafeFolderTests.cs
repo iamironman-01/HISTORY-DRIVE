@@ -543,6 +543,24 @@ public sealed class LinkSafeFolderTests
     }
 
     [Theory]
+    [InlineData(@"..\elsewhere")]
+    [InlineData(@"DriveMonitor\..\..\elsewhere")]
+    [InlineData(@".\DriveMonitor")]
+    [InlineData(@"\DriveMonitor")]
+    public void OpenBelow_RejectsTheDotsAndEmptyNamesThatAnExtendedPathKeeps(string below)
+    {
+        // Path.GetFullPath resolves them in other paths but leaves a \\?\ path as it is, so they reached the walk,
+        // which opened the root and created the folders before them first.
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string extendedRoot = @"\\?\" + root;
+
+        Assert.Throws<ArgumentException>(() => LinkSafeFolder.OpenBelow(extendedRoot, extendedRoot + @"\" + below, create: true));
+        Assert.Equal(new[] { root }, Directory.EnumerateFileSystemEntries(temp.FullPath));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+    }
+
+    [Theory]
     [InlineData("DriveMonitor:stream")]
     [InlineData(@"Drive*Monitor\Logs")]
     [InlineData(@"DriveMonitor\Logs?")]
@@ -617,6 +635,11 @@ public sealed class LinkSafeFolderTests
     [InlineData(@"C:\Users\me\AppData\Local", @"C:\Users\me\AppData\Local\..\activity.csv", false)]
     [InlineData(@"C:\Users\me\AppData\Local", @"D:\activity.csv", false)]
     [InlineData(@"C:\", @"D:\activity.csv", false)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\DriveMonitor\Logs\activity.csv", true)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\..\activity.csv", false)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\DriveMonitor\..\..\LocalLow\activity.csv", false)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\.\activity.csv", false)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\\activity.csv", false)]
     public void IsBelow_IsTrueOnlyForWhatIsInTheRootOrAFolderBelowIt(string root, string path, bool expected)
     {
         Assert.Equal(expected, LinkSafeFolder.IsBelow(root, path));
