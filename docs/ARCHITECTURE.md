@@ -50,7 +50,7 @@ flowchart TD
 1. **Kernel session.** `EtwFileIoSource` starts a real-time kernel session in system-logger mode with these
    kernel keywords:
    - `FileIOInit`: the initiation events (create, read, write, set information, delete, rename, cleanup,
-     close, flush, folder enumeration);
+     close, flush, folder enumeration, query information, file-system control, change notification);
    - `FileIO`: the `FileIo_OpEnd` completions, with the final NTSTATUS and the bytes transferred (only
      while `UseCompletionEvents` is on, the default);
    - `DiskFileIO`, plus `DiskIO`, which it requires: the events that bind a file name to a FileKey.
@@ -58,9 +58,9 @@ flowchart TD
    TraceEvent adds the Process and Thread keywords itself. The kernel cannot filter file events by volume,
    so the session receives the file activity of the whole system.
 2. **Copy.** The callbacks for initiation events copy the fields they need into a `PendingIo` (TraceEvent
-   reuses its event objects), resolving the file name and the process name on the way. Initiations and
-   completions are counted in `KernelEvents`; the starts that are only passed on for matching (step 3) are
-   not.
+   reuses its event objects), resolving the file name and the process name on the way. Initiations, accepted
+   or not, and completions are counted in `KernelEvents`; the starts of the kinds DriveMonitor does not
+   report, which are only passed on for matching (step 3), are not.
 3. **Filter.** For every initiation event, `MonitorEngine.TryAccept` converts a path that is still in
    kernel form, then rejects it when the path is not on a monitored drive (an empty path is counted as
    `UnnamedEvents`), when it comes from DriveMonitor's own process and `ExcludeOwnProcess` is set, or when
@@ -225,8 +225,9 @@ the consumer thread, which takes `_correlatorLock` for every completion. An oper
 never arrives is published as `Unknown` (a rename: without its target) instead of with the outcome of an
 operation that reused its address. Two gaps remain. A start delivered after the completion that it would
 rule out comes too late, and an initiation delivered after several later starts on its address knows only
-the latest of them; so two followed operations on one address whose events all arrive in reverse order can
-still be mismatched.
+the latest of them. The first gap can mismatch even two followed operations on one address: when the second
+one's completion is delivered before the first one's start, and the second start and the first completion
+only after that, the first operation takes the second one's completion and the second ends `Unknown`.
 
 ## Name resolution
 
@@ -322,9 +323,10 @@ The kernel reports paths such as `\Device\HarddiskVolume5\docs\a.txt`; DriveMoni
 channel of 100,000 events, or is counted in `Dropped` when the channel is full or the log has ended.
 
 - **One owner.** Once the constructor returns, a background task is the only code that writes or closes the
-  log's files. It formats the rows itself and writes them in chunks of about 64 KB with `WriteAsync`, on an
-  unbuffered `FileStream` opened with `FileOptions.Asynchronous`, so a write stuck on a stalled drive can be
-  cancelled and closing a file never flushes. `Written` counts the rows whose write completed.
+  log's files. It formats the rows itself, collects them into chunks of up to about 64 KB and writes each
+  chunk with `WriteAsync` once it is full or no more events are waiting, on an unbuffered `FileStream` opened
+  with `FileOptions.Asynchronous`, so a write stuck on a stalled drive can be cancelled and closing a file
+  never flushes. `Written` counts the rows whose write completed.
 - **Parts.** At `MaxLogFileMB` (100 MB) the log continues in a new file, a part, named like the first with
   `.002`, `.003` and so on before the extension: `activity.csv`, `activity.002.csv`, and so on. Each part
   starts with its own byte-order mark and header row and holds whole rows; a part exceeds the limit only when
@@ -339,9 +341,9 @@ channel of 100,000 events, or is counted in `Dropped` when the channel is full o
 - **Free space.** The constructor throws `IOException`, and creates no file, when the log's drive has less
   than `MinLogFreeSpaceMB` (512 MB) free. While logging, the free space is checked at most once a second and
   before every new part; below the minimum the log stops with an `IOException` in `Error` (its `HResult` is
-  `ERROR_DISK_FULL`), such as *Only 300 MB is free on C:\\; the activity log stops when less than 512 MB is
-  left.* The free space comes from `DriveInfo`, so a log on a network (UNC) path is not checked; a full share
-  still stops it with its write error.
+  0x80070070, `ERROR_DISK_FULL` as an HRESULT), such as *Only 300 MB is free on C:\\; the activity log stops
+  when less than 512 MB is left.* The free space comes from `DriveInfo`, so a log on a network (UNC) path is
+  not checked; a full share still stops it with its write error.
 - **Errors.** Any write error (disk full, drive removed, network share gone) ends the log in order: it
   refuses later events, so that `Write` counts them as dropped; it counts the rows it had buffered and the
   events still queued as dropped; it closes the file; and only then does it set `Error`, so whoever sees
@@ -432,8 +434,9 @@ sessions (`TraceEventSession.GetActiveSessionNames`):
   means the refusal above; a guard released in the meantime is taken. Otherwise the guard is stale or held
   to block monitoring: `Start` goes on without it and sets `MonitorEngine.StartWarning` to *Another program
   holds Global\DriveMonitor.Session.\<name>, which keeps two DriveMonitors from sharing the session "\<name>",
-  but no such session is running, so monitoring started anyway.* A DriveMonitor started later finds this one
-  by its session and refuses. The app and `drivemon` do not display `StartWarning`.
+  but no such session is running, so monitoring started anyway.* While the other program keeps the guard, a
+  DriveMonitor started later finds this one by its session and refuses. The app and `drivemon` do not display
+  `StartWarning`.
 - **The sessions cannot be listed:** `Start` refuses, with *Could not check whether another DriveMonitor is
   running: ...* when the guard could not even be opened, and with the message above otherwise.
 
@@ -548,15 +551,16 @@ exhaust memory or fill a drive.
 - **App.** `MainViewModel` owns the engine. A UI timer drains events into `ActivityFeed` (grouping, row
   limit, pause buffer) and applies statistics snapshots to `StatsTable`s for Files and Processes, which
   update rows in place. `ViewResort` re-sorts a sorted view after rows changed in place, and a table reports a
-  batch as one reset when so many rows are selected that item-by-item changes would cost more. `DeviceChangeWatcher` listens for volume arrival
-  and removal, and passes the letters of new local volumes on at once; while **Monitor new USB drives
-  automatically** is on, `DriveArrivals` then monitors each letter that has no drive listed, or whose drive
-  was external when it was last connected, until the next drive enumeration makes the final choice.
-  `SettingsStore` keeps `settings.json`, `ErrorLog` writes `errors.log`, and `SingleInstance` keeps to one
-  window per Windows session. Kernel sessions are started and stopped on the thread pool.
+  batch as one reset when so many rows are selected that item-by-item changes would cost more.
+  `DeviceChangeWatcher` listens for volume arrival and removal, and passes the letters of new local volumes
+  on at once; while **Monitor new USB drives automatically** is on, `DriveArrivals` then monitors each letter
+  that has no drive listed, or whose drive was external when it was last connected, until the next drive
+  enumeration makes the final choice. `SettingsStore` keeps `settings.json`, `ErrorLog` writes `errors.log`,
+  and `SingleInstance` keeps to one window per Windows session. Kernel sessions are started and stopped on
+  the thread pool.
 
   The app runs elevated, but `%LOCALAPPDATA%\DriveMonitor` belongs to the user, so any program the user runs
-  can plant junctions and links there. `SettingsStore` and `ErrorLog` therefore write through
+  can plant junctions and links there. `SettingsStore.TrySave` and `ErrorLog` therefore write through
   `LinkSafeFolder`, which checks the handles it then uses rather than paths, so a link swapped in after a
   check gains nothing. `Open` opens the folder with `FILE_FLAG_OPEN_REPARSE_POINT`, refuses it when it is a
   junction, symbolic link or other reparse point, and keeps it open without `FILE_SHARE_DELETE`, so it cannot
@@ -567,7 +571,7 @@ exhaust memory or fill a drive.
   `settings.json` is written to `settings.json.tmp` and renamed over the old file; `errors.log` is truncated
   through its open handle once it passes 1 MiB. When a check fails, the settings are not saved and the error
   is not logged. After a failed start, `SettingsStore.TrySetAside` moves `settings.json` to
-  `settings.bad.json`, so that the next start uses the defaults.
+  `settings.bad.json` by path (`File.Move`, without these checks), so that the next start uses the defaults.
 - **CLI.** `CliOptions` parses the arguments (`Program.cs`), `LiveMonitor` prints events and the summary,
   and `SelfTest` runs the end-to-end check. Without `--drives`, `DriveWatcher` keeps the default selection
   up to date: on each 200 ms pass it compares the drive letters that exist (`GetLogicalDrives`, which reads
