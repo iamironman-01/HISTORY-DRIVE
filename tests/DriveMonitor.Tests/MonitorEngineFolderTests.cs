@@ -131,6 +131,30 @@ public sealed class MonitorEngineFolderTests
     }
 
     [Fact]
+    public void FolderRenamedOnlyInCase_StaysAFolder()
+    {
+        // Windows keeps the case a name is given, so photos → Photos is a rename with a target. The old and the new
+        // path are the same folder to Windows, so the folder must stay known for the delete or move that follows.
+        const string recased = @"E:\Photos";
+        using MonitorEngine engine = CreateEngine();
+        List(engine, Folder);
+
+        OpenEither(engine, Folder);
+        FileActivityEvent renamed = Rename(engine, Folder, recased);
+
+        Assert.True(renamed.IsDirectory);
+        Assert.Equal(recased, renamed.TargetPath);
+        Assert.True(engine.Folders.IsFolder(recased));
+
+        OpenEither(engine, recased);
+        FileActivityEvent moved = Rename(engine, recased, NewName);
+
+        Assert.True(moved.IsDirectory);
+        Assert.Equal(NewName, moved.TargetPath);
+        Assert.True(FileStats(engine, Folder).IsDirectory); // one row for both spellings, and a folder
+    }
+
+    [Fact]
     public void RenamedFolder_GetsNoFileRowAtItsNewPath()
     {
         using MonitorEngine engine = CreateEngine();
