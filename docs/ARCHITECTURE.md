@@ -195,7 +195,7 @@ Publication (classification, folder flag, statistics, log, queue) runs on whiche
 operation (the consumer thread, the reorder timer, the release timer, or the thread that stops the session)
 and under `_correlatorLock`, so events are published one at a time and in initiation order. With
 `UseCompletionEvents` off, nothing is matched or held, and the consumer thread publishes each operation as
-it starts.
+it starts, without taking that lock.
 
 How the threads share state:
 
@@ -457,7 +457,7 @@ channel of 100,000 events, or is counted in `Dropped` when the channel is full o
   deleted: each of the app's recordings has its own timestamped name, and parts left by an earlier `drivemon`
   run with the same `--csv` path stay until a new part of the same name replaces them.
 - **Links.** The log runs as administrator, often in a folder that other users can change (the root of a
-  pendrive, a shared folder) and under names they can predict, so it never works by path. The constructor
+  pendrive, a shared folder) and under names they can predict, so it opens no file by path. The constructor
   creates a missing folder (`Directory.CreateDirectory`), then opens it once with `LinkSafeFolder.Open`, which
   refuses a junction, symbolic link or other reparse point at the folder itself, and holds that handle without
   `FILE_SHARE_DELETE` until the background task ends, on `Dispose` or on an error: meanwhile nobody can
@@ -467,10 +467,10 @@ channel of 100,000 events, or is counted in `Dropped` when the channel is full o
   `LinkSafeFolder.DeleteFile`, through the handle of the file it checked. A name that is a link, a folder or a
   file with more than one name is refused: for the first part the constructor, and so `StartLog`, throws an
   `IOException` that names the file, such as *'E:\log.csv' has other names (hard links); it is not used.*;
-  for a later part the log stops with that error. A path that names a folder or a drive root is refused with
-  *'\<path>' is a folder, not a file.* Junctions in the folders above the log's folder are followed: they
-  decide which folder the log opens, and that folder is then checked as above. FAT and exFAT have neither
-  reparse points nor hard links; on a network share the checks rest on the server.
+  for a later part the log stops with that error. A path that ends in a backslash, or a drive root, is
+  refused with *'\<path>' is a folder, not a file.* Junctions in the folders above the log's folder are
+  followed: they decide which folder the log opens, and that folder is then checked as above. FAT and exFAT
+  have neither reparse points nor hard links; on a network share the checks rest on the server.
 - **Free space.** The constructor throws `IOException`, and creates no file, when the log's drive has less
   than `MinLogFreeSpaceMB` (512 MB) free. While logging, the free space is checked at most once a second and
   before every new part; below the minimum the log stops with an `IOException` in `Error` (its `HResult` is
@@ -777,8 +777,9 @@ exhaust memory or fill a drive.
   volume map, enumerates the drives and adds each drive of the default selection that is not monitored yet.
   It never removes one. `ConsoleText.Clean` replaces control characters and bidirectional formatting
   characters with `?` in what other people choose before it is printed: paths, process names, details,
-  volume labels and drive models, and the start warning and the error messages that can quote them.
-  `CsvLogStatus` reports the state of the `--csv` log (see [Activity log](#activity-log)).
+  volume labels and drive models, and the start warning and the error messages that can quote them, but not
+  in the lines of the self-test's report. `CsvLogStatus` reports the state of the `--csv` log (see
+  [Activity log](#activity-log)).
 - **Self-test.** It reads every raw operation, with its completion, through the engine's internal
   `RawOperationObserver`. It works in a `TestFolder`, which keeps everything another user controls out of an
   elevated process's writes and deletes:
