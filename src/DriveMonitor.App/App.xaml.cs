@@ -17,6 +17,12 @@ public partial class App : Application
     private const int ErrorStormLimit = 5;
     private const long ErrorStormWindowMs = 30_000;
 
+    /// <summary>
+    /// How long logging off or shutting down waits for monitoring to stop and the activity log to be saved. Windows
+    /// lists a program that has not answered within about 5 s as one that prevents signing out or shutting down.
+    /// </summary>
+    private static readonly TimeSpan SessionEndingWait = TimeSpan.FromSeconds(3);
+
     private readonly Queue<long> _recentErrors = new();
     private SingleInstance? _instance;
     private SettingsStore? _settingsStore;
@@ -59,7 +65,7 @@ public partial class App : Application
         catch (Exception ex)
         {
             ErrorLog.Write(ex, "startup");
-            ShutDownViewModel(save: false);
+            ShutDownViewModel(save: false, Timeout.InfiniteTimeSpan);
 
             // Nothing is saved after a failed start, so a saved value that broke it would break every later start too.
             string? setAside = _settingsStore?.TrySetAside();
@@ -77,39 +83,48 @@ public partial class App : Application
         if (e.Cancel)
             return;
 
-        // Logging off or shutting down: stop the kernel session and save while there is still time.
+        // Logging off or shutting down: save, and stop the kernel session, while there is still time. Windows ends
+        // the process soon after the session ends, and lists it as one that prevents the logoff if it takes more than
+        // about 5 s to answer, so this waits only briefly. The settings are saved first, and the kernel session (which
+        // would outlive the process) is stopped before the log; events the log has not written by then may be lost.
         _window?.CaptureBounds();
-        ShutDownViewModel(save: true);
+        ShutDownViewModel(save: true, SessionEndingWait);
 
-        // Monitoring is gone now; close even if another program cancels the logoff. Posted so that
-        // the window does not close in the middle of WM_QUERYENDSESSION.
+        // Close even if another program cancels the logoff. Posted so that the window does not close in the middle
+        // of WM_QUERYENDSESSION.
         Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() => Shutdown()));
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
-        ShutDownViewModel(save: true);
+        // The window closes only once the view model has stopped everything, so this does not wait then. During a
+        // logoff OnSessionEnding has already waited as long as it could, and this does nothing.
+        ShutDownViewModel(save: true, Timeout.InfiniteTimeSpan);
         _instance?.Dispose();
         base.OnExit(e);
     }
 
-    /// <summary>Stops monitoring (timers, kernel session, log) and saves the settings, once.</summary>
-    private void ShutDownViewModel(bool save)
+    /// <summary>
+    /// Saves the settings and stops monitoring (timers, kernel session, log), once. The view model stops on the
+    /// thread pool; this waits for it at most <paramref name="wait"/>.
+    /// </summary>
+    private void ShutDownViewModel(bool save, TimeSpan wait)
     {
         if (Interlocked.Exchange(ref _shutDown, 1) != 0)
             return;
 
+        // Before the wait: during a logoff Windows may end the process while the log is still being saved.
+        if (save && _settings is not null)
+            _settingsStore?.TrySave(_settings);
+
         try
         {
-            _viewModel?.Dispose();
+            _viewModel?.ShutDownAsync().Wait(wait);
         }
         catch (Exception ex)
         {
             ErrorLog.Write(ex, "shutdown");
         }
-
-        if (save && _settings is not null)
-            _settingsStore?.TrySave(_settings);
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
