@@ -83,7 +83,8 @@ Another DriveMonitor window or command is already monitoring with the session "D
 use a name, because starting a session with a name that is in use would silently end the other program's
 session. A machine-wide guard, the semaphore `Global\DriveMonitor.Session.<session name>`, enforces this
 together with the list of running trace sessions: the message appears when the guard is taken and a kernel
-session with that name is running.
+session with that name is running, or when another process holds the guard and the running sessions cannot
+be listed.
 
 | Session name | Used by |
 | --- | --- |
@@ -185,8 +186,9 @@ DriveMonitor read them, and the kernel threw events away.
 **Dropped** means DriveMonitor's own queue (250,000 events) overflowed because the window or the console did
 not take events out fast enough, so the oldest were discarded. Totals in Files and Processes, the Record log
 and the `--csv` file still include them, because those are written before the queue; only Live activity and
-the printed lines miss them. With `drivemon`, `--quiet` together with `--csv FILE` keeps every event without
-printing it.
+the printed lines miss them. With `drivemon`, `--quiet` together with `--csv FILE` writes every event to the
+file without printing it, within the
+[activity log's limits](#the-activity-log-stops-or-is-split-into-several-files).
 
 ### Unnamed
 
@@ -223,8 +225,9 @@ back the ones after it for up to 2 more seconds.
 - the status bar says *Monitoring N drives*, not *Stopped* or *Monitoring, no drive selected*, and the drive
   is ticked (for `drivemon`: listed in `--drives`, or, without `--drives`, marked `yes` by `--list`; a drive
   plugged in later is announced with `Now monitoring`);
-- it did not happen in the first moment after the drive was plugged in: the app watches a new drive from the
-  moment Windows reports it, and `drivemon` from its next check for new drive letters, every 200 ms;
+- it did not happen in the first moment after the drive was plugged in: the app, with **Monitor new USB drives
+  automatically** on, watches a new drive from the moment Windows reports it, and `drivemon` from its next
+  check for new drive letters, every 200 ms;
 - the operation is shown: opens, folder listings, other changes, paging I/O and failed operations are hidden
   by default (for `drivemon`: `--opens`, `--listings`, `--other`, `--paging`, `--failed`);
 - the search box is empty and **Pause view** is off;
@@ -321,7 +324,7 @@ opens its `Logs` subfolder.
   no screen can have is dropped. If a saved value still keeps the app from starting, the app moves
   `settings.json` to `settings.bad.json`, says so, and starts with the defaults the next time.
 - **Settings are not saved, or nothing is written to `errors.log`:** the app runs as administrator but keeps
-  these files in your profile, so it refuses links there. It does not write when
+  these files in your profile, so it refuses links when it writes them. It does not write them when
   `%LOCALAPPDATA%\DriveMonitor`, `settings.json`, `settings.json.tmp` or `errors.log` is a junction, a
   symbolic link or a file with more than one name (a hard link). Replace the link with a plain folder or
   file.
