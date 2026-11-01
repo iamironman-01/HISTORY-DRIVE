@@ -169,6 +169,23 @@ public sealed class MonitorEngineSinkTests
     }
 
     [Fact]
+    public void StartLog_WithATrustedRoot_FollowsNoLinkBelowIt_AndTakesNoFileOutsideIt()
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        using IDisposable planted = FileLinks.CreateJunction(Path.Combine(root, "DriveMonitor"), victim);
+        using var engine = new MonitorEngine();
+
+        Assert.Throws<IOException>(() => engine.StartLog(Path.Combine(root, "DriveMonitor", "Logs", "activity.csv"), root));
+        Assert.Throws<ArgumentException>(() => engine.StartLog(temp.PathOf("activity.csv"), root));
+
+        Assert.Null(engine.Log);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+        Assert.False(File.Exists(temp.PathOf("activity.csv")));
+    }
+
+    [Fact]
     public void OnBegin_WithoutCompletionEvents_PublishesAtOnce()
     {
         using MonitorEngine engine = CreateEngine(new MonitorOptions { UseCompletionEvents = false });

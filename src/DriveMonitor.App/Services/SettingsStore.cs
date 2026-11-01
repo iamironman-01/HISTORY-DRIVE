@@ -122,33 +122,58 @@ public sealed class SettingsStore
         AllowTrailingCommas = true,
     };
 
-    public SettingsStore(string? filePath = null)
+    private readonly string? _trustedRoot;
+
+    /// <param name="filePath">The settings file; null for <c>%LOCALAPPDATA%\DriveMonitor\settings.json</c>.</param>
+    /// <param name="trustedRoot">
+    /// A folder above the file below which no link is followed when the file is read, written or set aside;
+    /// <see cref="TrustedRoot"/> for the default file. Without one only the file's own folder is checked.
+    /// </param>
+    public SettingsStore(string? filePath = null, string? trustedRoot = null)
     {
         FilePath = filePath ?? Path.Combine(AppDataDirectory, "settings.json");
+        _trustedRoot = trustedRoot ?? (filePath is null ? TrustedRoot : null);
     }
 
+    /// <summary>
+    /// <c>%LOCALAPPDATA%</c>, which holds every file the app writes. The elevated app trusts its path, which an
+    /// administrator may have redirected, but follows no link below it (<see cref="LinkSafeFolder.OpenBelow"/>):
+    /// the user's own programs can put one there.
+    /// </summary>
+    public static string TrustedRoot { get; } = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
     /// <summary><c>%LOCALAPPDATA%\DriveMonitor</c>.</summary>
-    public static string AppDataDirectory { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveMonitor");
+    public static string AppDataDirectory { get; } = Path.Combine(TrustedRoot, "DriveMonitor");
 
     /// <summary>Where "Record log" writes its CSV files.</summary>
     public static string LogsDirectory { get; } = Path.Combine(AppDataDirectory, "Logs");
 
     public string FilePath { get; }
 
-    /// <summary>The saved settings; defaults when the file is missing, unreadable or corrupt.</summary>
+    /// <summary>
+    /// The saved settings; defaults when the file is missing, unreadable or corrupt, or when it or a folder on its
+    /// way is a link, or it has other names (hard links).
+    /// </summary>
     public AppSettings Load()
     {
         try
         {
-            if (File.Exists(FilePath)
-                && JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), JsonOptions) is { } settings)
+            // Read through the folder, as TrySave writes: by path, the elevated app would follow a link that a
+            // program of the user planted on the way, to a file of that program's choosing or, through
+            // \RPC Control, to a pipe or a device.
+            string fullPath = Path.GetFullPath(FilePath);
+            using LinkSafeFolder folder = OpenFolder(Path.GetDirectoryName(fullPath)!, create: false);
+            using FileStream file = folder.OpenFile(Path.GetFileName(fullPath), FileMode.Open, FileAccess.Read, FileShare.Read);
+
+            // As File.ReadAllText reads: UTF-8 unless a byte order mark says otherwise.
+            using var reader = new StreamReader(file);
+            if (JsonSerializer.Deserialize<AppSettings>(reader.ReadToEnd(), JsonOptions) is { } settings)
             {
                 settings.Normalize();
                 return settings;
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or JsonException or NotSupportedException)
         {
             // Start with defaults; the file is rewritten on exit.
         }
@@ -156,20 +181,18 @@ public sealed class SettingsStore
         return new AppSettings();
     }
 
-    /// <returns>False when the file could not be written, or when it or its folder is a link.</returns>
+    /// <returns>False when the file could not be written, or when it or a folder on its way is a link.</returns>
     public bool TrySave(AppSettings settings)
     {
         try
         {
             string fullPath = Path.GetFullPath(FilePath);
-            string folderPath = Path.GetDirectoryName(fullPath)!;
             string name = Path.GetFileName(fullPath);
             byte[] json = JsonSerializer.SerializeToUtf8Bytes(settings, JsonOptions);
-            Directory.CreateDirectory(folderPath);
 
             // The app runs elevated, and any program of the user can plant a junction or link in this
-            // folder; LinkSafeFolder refuses links instead of following them.
-            using LinkSafeFolder folder = LinkSafeFolder.Open(folderPath);
+            // folder, or in place of it; LinkSafeFolder refuses links instead of following them.
+            using LinkSafeFolder folder = OpenFolder(Path.GetDirectoryName(fullPath)!, create: true);
 
             // Write a temporary file first so a crash or full disk never leaves a truncated file behind.
             using FileStream temporary = folder.OpenFile(name + ".tmp", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, allowRename: true);
@@ -178,7 +201,7 @@ public sealed class SettingsStore
             folder.Rename(temporary, name);
             return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             return false;
         }
@@ -193,15 +216,32 @@ public sealed class SettingsStore
     {
         try
         {
-            if (!File.Exists(FilePath))
-                return null;
+            string fullPath = Path.GetFullPath(FilePath);
             string target = Path.ChangeExtension(FilePath, ".bad.json");
-            File.Move(FilePath, target, overwrite: true);
+
+            // Renamed through the folder, as TrySave writes: a link on the way, at the file or at the new name is
+            // refused, so the elevated app cannot be made to move or replace another file. A missing folder or
+            // file fails to open, so nothing is looked up by path first.
+            using LinkSafeFolder folder = OpenFolder(Path.GetDirectoryName(fullPath)!, create: false);
+            using FileStream file = folder.OpenFile(
+                Path.GetFileName(fullPath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, allowRename: true);
+            folder.Rename(file, Path.GetFileName(target));
             return target;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             return null;
         }
+    }
+
+    /// <summary>The file's folder: below the trusted root without following a link, or else refused only when it is a link itself.</summary>
+    private LinkSafeFolder OpenFolder(string folderPath, bool create)
+    {
+        if (_trustedRoot is not null)
+            return LinkSafeFolder.OpenBelow(_trustedRoot, folderPath, create);
+
+        if (create)
+            Directory.CreateDirectory(folderPath);
+        return LinkSafeFolder.Open(folderPath);
     }
 }

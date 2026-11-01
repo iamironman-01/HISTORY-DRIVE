@@ -20,6 +20,12 @@ namespace DriveMonitor.Core.IO;
 /// looked up again, and with FILE_OPEN_REPARSE_POINT, so a link is opened as itself and refused; renames
 /// stay in the folder, and deletes go through the handle of the file that was checked.
 /// <para>
+/// <see cref="Open"/> checks only the folder itself and follows a link on a folder above it. Where the user
+/// also controls the folders above, <see cref="OpenBelow"/> starts from a root the caller trusts, such as
+/// <c>%LOCALAPPDATA%</c>, and opens (or creates) each folder below it relative to its parent's handle in the
+/// same way, so no link below the root is followed.
+/// </para>
+/// <para>
 /// A file system without reparse points may reject FILE_OPEN_REPARSE_POINT as an invalid parameter, as
 /// DeleteFile also allows for. The open is then repeated without it: there is no link to open as itself, and
 /// the handle is still checked for being a folder or having other names.
@@ -42,6 +48,7 @@ public sealed class LinkSafeFolder : IDisposable
     private const uint FileOpenDisposition = 1;
     private const uint FileCreateDisposition = 2;
     private const uint FileOpenIfDisposition = 3;
+    private const uint FileDirectoryFile = 0x1;
     private const uint FileSynchronousIoNonAlert = 0x20;
     private const uint FileNonDirectoryFile = 0x40;
     private const uint FileOpenReparsePoint = 0x0020_0000;
@@ -54,6 +61,7 @@ public sealed class LinkSafeFolder : IDisposable
     private const int StatusInvalidParameter = unchecked((int)0xC000_000D);
     private const int StatusObjectNameNotFound = unchecked((int)0xC000_0034);
     private const int StatusFileIsADirectory = unchecked((int)0xC000_00BA);
+    private const int StatusNotADirectory = unchecked((int)0xC000_0103);
     private const int ErrorAccessDenied = 5;
     private const int ErrorInvalidParameter = 87;
 
@@ -94,16 +102,84 @@ public sealed class LinkSafeFolder : IDisposable
 
         try
         {
-            uint attributes = Query(handle, fullPath).FileAttributes;
-            if ((attributes & FileAttributeReparsePoint) != 0)
-                throw new IOException($"'{fullPath}' is a junction, symbolic link or other reparse point; it is not followed.");
-            if ((attributes & FileAttributeDirectory) == 0)
-                throw new IOException($"'{fullPath}' is not a folder.");
+            ThrowUnlessPlainFolder(handle, fullPath);
             return new LinkSafeFolder(fullPath, handle);
         }
         catch
         {
             handle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Opens a folder below a trusted root, and creates the missing folders on the way when asked, without
+    /// following any link below the root.
+    /// </summary>
+    /// <remarks>
+    /// The root is opened by its path, following links: the caller trusts whatever it is (an administrator may
+    /// have redirected <c>%LOCALAPPDATA%</c>, say), so it only has to be a folder. Each folder below it is then
+    /// opened, or created, relative to its parent's handle with FILE_OPEN_REPARSE_POINT, and refused as
+    /// <see cref="Open"/> refuses its folder when it is a junction, symbolic link or other reparse point. Every
+    /// parent stays open, so that it cannot be renamed and replaced, until its child is open. The folder returned
+    /// is held and used like one from <see cref="Open"/>.
+    /// </remarks>
+    /// <param name="trustedRoot">An existing folder whose path the caller trusts, such as <c>%LOCALAPPDATA%</c>.</param>
+    /// <param name="path">The folder: the root or a folder below it, as a full path or relative to the root.</param>
+    /// <param name="create">Creates the folders below the root that do not exist.</param>
+    /// <exception cref="ArgumentException"><paramref name="path"/> is neither the root nor below it, or has a name that is not a folder name.</exception>
+    /// <exception cref="IOException">
+    /// The root is not a folder or cannot be opened; or a folder below it is a junction, symbolic link or other
+    /// reparse point, is not a folder, is missing and not to be created, or cannot be opened or created.
+    /// </exception>
+    /// <exception cref="UnauthorizedAccessException">Access to a folder on the way is denied.</exception>
+    public static LinkSafeFolder OpenBelow(string trustedRoot, string path, bool create = false)
+    {
+        string root = FullFolderPath(trustedRoot);
+        string fullPath = FullFolderPath(Path.Combine(root, path));
+        string[] names = NamesBelow(root, fullPath)
+            ?? throw new ArgumentException($"'{fullPath}' is not in '{root}'.", nameof(path));
+        foreach (string name in names)
+        {
+            if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                throw new ArgumentException($"'{name}' in '{fullPath}' is not a folder name.", nameof(path));
+        }
+
+        // Trusted: a link on the root's own path is followed.
+        SafeFileHandle handle = OpenFolder(root, 0, out int error);
+        if (handle.IsInvalid)
+        {
+            handle.Dispose();
+            throw ErrorFromWin32(error, root);
+        }
+
+        LinkSafeFolder folder;
+        try
+        {
+            if ((Query(handle, root).FileAttributes & FileAttributeDirectory) == 0)
+                throw new IOException($"'{root}' is not a folder.");
+            folder = new LinkSafeFolder(root, handle);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+
+        try
+        {
+            foreach (string name in names)
+            {
+                LinkSafeFolder child = folder.OpenSubfolder(name, create);
+                folder.Dispose();
+                folder = child;
+            }
+
+            return folder;
+        }
+        catch
+        {
+            folder.Dispose();
             throw;
         }
     }
@@ -267,6 +343,16 @@ public sealed class LinkSafeFolder : IDisposable
 
     public void Dispose() => _handle.Dispose();
 
+    /// <summary>
+    /// Whether <paramref name="path"/>, as a full path or relative to the root, is below
+    /// <paramref name="trustedRoot"/>: in it or in a folder below it. The root itself is not below itself.
+    /// </summary>
+    internal static bool IsBelow(string trustedRoot, string path)
+    {
+        string root = FullFolderPath(trustedRoot);
+        return NamesBelow(root, FullFolderPath(Path.Combine(root, path))) is { Length: > 0 };
+    }
+
     private static void ValidateName(string name)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
@@ -283,6 +369,15 @@ public sealed class LinkSafeFolder : IDisposable
             throw new IOException($"'{fullPath}' is a folder, not a file.");
         if (information.NumberOfLinks != 1)
             throw new IOException($"'{fullPath}' has other names (hard links); it is not used.");
+    }
+
+    private static void ThrowUnlessPlainFolder(SafeFileHandle handle, string fullPath)
+    {
+        uint attributes = Query(handle, fullPath).FileAttributes;
+        if ((attributes & FileAttributeReparsePoint) != 0)
+            throw new IOException($"'{fullPath}' is a junction, symbolic link or other reparse point; it is not followed.");
+        if ((attributes & FileAttributeDirectory) == 0)
+            throw new IOException($"'{fullPath}' is not a folder.");
     }
 
     private static ByHandleFileInformation Query(SafeFileHandle handle, string fullPath)
@@ -321,6 +416,61 @@ public sealed class LinkSafeFolder : IDisposable
         }
 
         return fullPath.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + fullPath[2..] : @"\\?\" + fullPath;
+    }
+
+    /// <summary>A full path without a separator at its end, unless that separator is the root's.</summary>
+    private static string FullFolderPath(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
+    /// <summary>
+    /// The names of the folders from <paramref name="root"/> down to <paramref name="fullPath"/>, both made by
+    /// <see cref="FullFolderPath"/>: none for the root itself, null when the path is not below the root.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Path.GetFullPath(string)"/> leaves an extended path (\\?\) as it is, so its '.', '..' and empty
+    /// names would reach the walk, which opens each name in turn: such a path is not below the root either.
+    /// </remarks>
+    private static string[]? NamesBelow(string root, string fullPath)
+    {
+        if (string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        string prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+        if (fullPath.Length <= prefix.Length || !fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        string[] names = fullPath[prefix.Length..].Split(Path.DirectorySeparatorChar);
+        return Array.Exists(names, name => name is "" or "." or "..") ? null : names;
+    }
+
+    /// <summary>
+    /// Opens a folder directly in this one, or creates it, refusing a link as <see cref="Open"/> does. The handle
+    /// has the rights and sharing that <see cref="OpenFolder"/> gives, so the folder is held in the same way.
+    /// </summary>
+    private LinkSafeFolder OpenSubfolder(string name, bool create)
+    {
+        string fullPath = Path.Combine(FullPath, name);
+        int status = OpenRelative(
+            name, FileListDirectory | FileReadAttributes | Synchronize, FileShare.ReadWrite,
+            create ? FileOpenIfDisposition : FileOpenDisposition,
+            FileDirectoryFile | FileSynchronousIoNonAlert | FileOpenReparsePoint, out SafeFileHandle handle);
+        if (status < 0)
+        {
+            handle.Dispose();
+            if (status == StatusNotADirectory)
+                throw new IOException($"'{fullPath}' is not a folder.");
+            throw ErrorFromNtStatus(status, fullPath);
+        }
+
+        try
+        {
+            ThrowUnlessPlainFolder(handle, fullPath);
+            return new LinkSafeFolder(fullPath, handle);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

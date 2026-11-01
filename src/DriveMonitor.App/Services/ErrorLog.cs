@@ -23,13 +23,13 @@ public static class ErrorLog
         {
             lock (Sync)
             {
-                Directory.CreateDirectory(SettingsStore.AppDataDirectory);
                 string time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
                 byte[] entry = Encoding.UTF8.GetBytes($"{time} {context}{Environment.NewLine}{exception}{Environment.NewLine}{Environment.NewLine}");
 
                 // The app runs elevated, and any program of the user can plant a junction or link in this
-                // folder; LinkSafeFolder refuses links instead of following them.
-                using LinkSafeFolder folder = LinkSafeFolder.Open(SettingsStore.AppDataDirectory);
+                // folder, or in place of it; LinkSafeFolder creates and opens it below %LOCALAPPDATA% and
+                // refuses links instead of following them.
+                using LinkSafeFolder folder = LinkSafeFolder.OpenBelow(SettingsStore.TrustedRoot, SettingsStore.AppDataDirectory, create: true);
                 using FileStream log = folder.OpenFile(FileName, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read);
 
                 // Start again once the log is large. Truncating the open file deletes nothing by path.

@@ -26,6 +26,13 @@ namespace DriveMonitor.Core.Export;
 /// replaced by one while the log runs. Every part is created and deleted relative to it, and a link,
 /// folder or hard-linked file found at a part's name is refused instead of followed.
 /// </para>
+/// <para>
+/// That alone checks only the folder itself: a link on a folder above it is followed, and a missing folder
+/// is created by path. That suits a path the user chose (drivemon --csv), but not the app's folder in
+/// <c>%LOCALAPPDATA%</c>, where between two logs the user can put a junction in place of a folder above it.
+/// Given a trusted root, the folder must be below it and is opened, and created, with
+/// <see cref="LinkSafeFolder.OpenBelow"/>, which follows no link below the root.
+/// </para>
 /// </remarks>
 public sealed class CsvActivityLog : IDisposable
 {
@@ -76,11 +83,19 @@ public sealed class CsvActivityLog : IDisposable
     /// <param name="maxFiles">How many parts are kept; starting a new one deletes the oldest. 0 keeps all.</param>
     /// <param name="minFreeBytes">The log stops with an error when less than this is free on its drive; 0 for no check.</param>
     /// <param name="capacity">Events that may wait for the writer before new ones are dropped.</param>
+    /// <param name="trustedRoot">
+    /// A folder above the file whose path is trusted, such as <c>%LOCALAPPDATA%</c>: the file must be below it, and
+    /// its folder is opened, and created when missing, without following any link below the root. Null creates the
+    /// folder by path and refuses only a link at the folder itself.
+    /// </param>
+    /// <exception cref="ArgumentException"><paramref name="filePath"/> is not below <paramref name="trustedRoot"/>.</exception>
     /// <exception cref="IOException">
-    /// The file cannot be created; it, or its folder, is a junction, symbolic link or other reparse point, or the
-    /// file has other names (hard links); or its drive already has less than <paramref name="minFreeBytes"/> free.
+    /// The file cannot be created; it, its folder or, with <paramref name="trustedRoot"/>, a folder between the root
+    /// and it is a junction, symbolic link or other reparse point, or the file has other names (hard links); or its
+    /// drive already has less than <paramref name="minFreeBytes"/> free.
     /// </exception>
-    public CsvActivityLog(string filePath, long maxFileBytes = 0, int maxFiles = 0, long minFreeBytes = 0, int capacity = 100_000)
+    public CsvActivityLog(
+        string filePath, long maxFileBytes = 0, int maxFiles = 0, long minFreeBytes = 0, int capacity = 100_000, string? trustedRoot = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maxFileBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(maxFiles);
@@ -93,6 +108,8 @@ public sealed class CsvActivityLog : IDisposable
         string? folderPath = Path.GetDirectoryName(FilePath);
         if (folderPath is null || Path.GetFileName(FilePath).Length == 0)
             throw new IOException($"'{FilePath}' is a folder, not a file.");
+        if (trustedRoot is not null && !LinkSafeFolder.IsBelow(trustedRoot, FilePath))
+            throw new ArgumentException($"'{FilePath}' is not in '{Path.GetFullPath(trustedRoot)}'.", nameof(filePath));
         _extension = Path.GetExtension(FilePath);
         _stem = FilePath[..^_extension.Length];
         _currentFilePath = FilePath;
@@ -102,8 +119,16 @@ public sealed class CsvActivityLog : IDisposable
 
         // Refuse at once rather than start a log that stops at its first write.
         CheckFreeSpace();
-        Directory.CreateDirectory(folderPath);
-        _folder = LinkSafeFolder.Open(folderPath);
+        if (trustedRoot is null)
+        {
+            Directory.CreateDirectory(folderPath);
+            _folder = LinkSafeFolder.Open(folderPath);
+        }
+        else
+        {
+            _folder = LinkSafeFolder.OpenBelow(trustedRoot, folderPath, create: true);
+        }
+
         try
         {
             _file = CreateFile(FilePath);

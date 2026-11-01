@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using DriveMonitor.Core.IO;
 
 namespace DriveMonitor.App.Services;
 
@@ -33,10 +34,14 @@ public static class ShellActions
         return null;
     }
 
-    /// <summary>Opens <paramref name="folder"/> in File Explorer, creating it first if needed.</summary>
-    public static void OpenFolder(string folder)
+    /// <summary>
+    /// Opens <paramref name="folder"/> in File Explorer, creating it first if needed. The elevated app creates it as
+    /// the activity log does, without following a link below <paramref name="trustedRoot"/>.
+    /// </summary>
+    /// <exception cref="IOException">A folder below the root is a link, or the folder cannot be created.</exception>
+    public static void OpenFolder(string folder, string trustedRoot)
     {
-        Directory.CreateDirectory(folder);
+        LinkSafeFolder.OpenBelow(trustedRoot, folder, create: true).Dispose();
         StartExplorer(Quote(folder));
     }
 
