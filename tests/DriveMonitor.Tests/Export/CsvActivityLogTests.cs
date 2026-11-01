@@ -148,6 +148,50 @@ public sealed class CsvActivityLogTests
     }
 
     [Fact]
+    public void Dispose_WhenTheWriterIgnoresCancellation_StillStopsTheLogWithAnError()
+    {
+        using var temp = new TempDirectory();
+        using var asking = new ManualResetEventSlim();
+        using var answer = new ManualResetEventSlim();
+        using var log = new CsvActivityLog(temp.PathOf("log.csv"), minFreeBytes: 1)
+        {
+            StallTimeout = TimeSpan.FromMilliseconds(100),
+
+            // A hung drive: asking for its free space blocks, and cancelling the log does not end that.
+            FreeSpaceProbe = _ =>
+            {
+                asking.Set();
+                answer.Wait();
+                return null;
+            },
+        };
+        try
+        {
+            log.Write(Event(0));
+            Assert.True(asking.Wait(TimeSpan.FromSeconds(5)), "the log did not reach its drive");
+            log.Write(Event(1));
+
+            var clock = Stopwatch.StartNew();
+            log.Dispose();
+            clock.Stop();
+
+            // Dispose gave up on the writer; whoever stopped the log must not take it for one that wrote everything.
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), $"Dispose took {clock.Elapsed}");
+            Assert.IsType<TimeoutException>(log.Error);
+            Assert.Equal(0L, log.Written);
+            Assert.Equal(1L, log.Dropped); // the queued event; the one the writer holds is counted when the drive answers
+        }
+        finally
+        {
+            answer.Set();
+        }
+
+        Assert.True(SpinWait.SpinUntil(() => log.Dropped == 2, TimeSpan.FromSeconds(5)), $"dropped {log.Dropped}");
+        Assert.Equal(0L, log.Written);
+        Assert.IsType<TimeoutException>(log.Error);
+    }
+
+    [Fact]
     public void AfterAWriteError_EveryUnwrittenAndLaterEventIsCountedAsDropped()
     {
         using var destination = new PipeDestination();

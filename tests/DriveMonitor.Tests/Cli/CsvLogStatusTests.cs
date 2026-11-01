@@ -177,6 +177,50 @@ public sealed class CsvLogStatusTests
     }
 
     [Fact]
+    public void Finish_WhenTheDriveStopsResponding_ReportsTheFailureAndFailsTheRun()
+    {
+        using var temp = new TempDirectory();
+        using var asking = new ManualResetEventSlim();
+        using var answer = new ManualResetEventSlim();
+        using var log = new CsvActivityLog(temp.PathOf("activity.csv"), minFreeBytes: 1)
+        {
+            StallTimeout = TimeSpan.FromMilliseconds(100),
+
+            // A drive that stops responding: asking it for its free space blocks, and cancelling does not end that.
+            FreeSpaceProbe = _ =>
+            {
+                asking.Set();
+                answer.Wait();
+                return null;
+            },
+        };
+        try
+        {
+            var status = new CsvLogStatus(log) { FinishingNoticeDelay = TimeSpan.FromMinutes(1) };
+            var error = new StringWriter();
+            log.Write(Event(0));
+            Assert.True(asking.Wait(TimeSpan.FromSeconds(5)), "the log did not reach its drive");
+            log.Write(Event(1));
+
+            status.Finish(log.Dispose, TextWriter.Null, error);
+
+            // Stopping gave up on the drive: the run fails and says why, although the writer has not returned.
+            Assert.True(status.Failed);
+            Assert.Equal(1, LiveMonitor.ExitCode(status));
+            Assert.Equal(
+                $"The CSV log stopped: {CsvLogStatus.Sentence(log.Error!.Message)} 0 rows were written to {log.FilePath} " +
+                "and 1 was dropped." + Environment.NewLine,
+                error.ToString());
+        }
+        finally
+        {
+            // The drive answers at last; the writer ends before the folder is deleted.
+            answer.Set();
+            SpinWait.SpinUntil(() => log.Written + log.Dropped == 2, TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
     public void SummaryLine_LogThatContinuedInMoreFiles_NamesTheFirstAndTheCurrentFile()
     {
         using var temp = new TempDirectory();

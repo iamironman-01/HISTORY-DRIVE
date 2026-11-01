@@ -38,7 +38,10 @@ internal sealed class CsvLogStatus(CsvActivityLog log)
         ReportFailure(error, monitoring: false);
     }
 
-    /// <summary>The summary's line for the log. Its counts are final once <see cref="Finish"/> has returned.</summary>
+    /// <summary>
+    /// The summary's line for the log. Its counts are final once <see cref="Finish"/> has returned, unless stopping
+    /// gave up on a drive that stopped responding: the rows that drive still holds are not counted yet.
+    /// </summary>
     public string SummaryLine()
     {
         Exception? failure = log.Error; // first: it is set once the counts are final
