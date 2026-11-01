@@ -126,19 +126,21 @@ public sealed class CsvLogStatusTests
         using var log = new CsvActivityLog(temp.PathOf("activity.csv"));
         var status = new CsvLogStatus(log) { FinishingNoticeDelay = TimeSpan.FromMilliseconds(20) };
         using var output = new SignallingWriter();
+        bool noticeWhileStopping = false;
         bool stopped = false;
 
         // A drive slower than the notice delay: the log is stopped only once the notice is out.
         status.Finish(
             () =>
             {
-                output.LineWritten.Wait(TimeSpan.FromSeconds(10));
+                noticeWhileStopping = output.LineWritten.Wait(TimeSpan.FromSeconds(10));
                 log.Dispose();
                 stopped = true;
             },
             output,
             TextWriter.Null);
 
+        Assert.True(noticeWhileStopping, "the notice did not come while the log was being stopped");
         Assert.True(stopped);
         Assert.Equal("Finishing the CSV log..." + Environment.NewLine, output.ToString());
     }
