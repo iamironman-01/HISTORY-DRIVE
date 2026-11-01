@@ -813,8 +813,36 @@ public sealed class FileIoClassifierTests
     }
 
     [Theory]
+    [InlineData(@"E:\docs\Report.docx", "\u2192 E:\\docs\\Report.docx")] // Windows keeps the new case
+    [InlineData(@"E:\docs\REPORT.DOCX", "\u2192 E:\\docs\\REPORT.DOCX")]
+    [InlineData(@"e:\DOCS\Report.docx", "\u2192 e:\\DOCS\\Report.docx")]
+    public void RenameEvent_ThatOnlyChangesTheNamesCase_ReportsTheTarget(string target, string detail)
+    {
+        PendingIo io = Completed(Io(RawFileOp.Rename), status: 0, info: 0);
+        io.TargetPath = target;
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(target, ev.TargetPath);
+        Assert.Equal(detail, ev.Detail);
+    }
+
+    [Fact]
+    public void RenameEvent_OfAFolderThatOnlyChangesItsCase_ReportsTheTarget()
+    {
+        PendingIo io = Completed(Io(RawFileOp.Rename), status: 0, info: 0);
+        io.Path = @"E:\photos";
+        io.TargetPath = @"E:\Photos";
+
+        FileActivityEvent ev = Classify(io);
+
+        Assert.Equal(@"E:\Photos", ev.TargetPath);
+        Assert.Equal("\u2192 E:\\Photos", ev.Detail);
+    }
+
+    [Theory]
     [InlineData(@"E:\docs\report.docx")] // the old name: the event did not carry the target
-    [InlineData(@"e:\DOCS\REPORT.DOCX")]
+    [InlineData(@"e:\DOCS\report.docx")] // the same file: Windows looks folders up without case
     [InlineData(@"\Device\HarddiskVolume9\x.docx")] // no drive letter
     [InlineData(@"\\server\share\x.docx")]
     [InlineData("E:")]
