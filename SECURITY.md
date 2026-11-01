@@ -51,7 +51,8 @@ publishes from `main` is the supported one.
 
 - **Administrator rights.** Windows lets only administrators start a kernel trace session. The app's
   manifest requests elevation (`requireAdministrator`), so with the default UAC settings Windows asks every
-  time it starts. `drivemon` checks for elevation and exits without it, except for `--list` and `--help`.
+  time it starts. `drivemon` checks for elevation and exits without it, except for `--list`, `--version` and
+  `--help`.
 - Everything DriveMonitor does therefore runs with an administrator token. Run only binaries you trust:
   build them from source, or take a zip from this repository's CI runs or releases and check its SHA-256
   checksum. The binaries are not code-signed.
@@ -75,13 +76,14 @@ publishes from `main` is the supported one.
 
 | Path | When | Contents |
 | --- | --- | --- |
-| `%LOCALAPPDATA%\DriveMonitor\settings.json` | The app exits, or Windows logs off or shuts down | Filters, options, drive choices, window position; written through `settings.json.tmp` |
-| `%LOCALAPPDATA%\DriveMonitor\errors.log` | An unexpected error in the app | Time, context and exception details, which can include paths; deleted and started again once it exceeds 1 MiB |
-| `%LOCALAPPDATA%\DriveMonitor\Logs\activity-YYYYMMDD-HHMMSS.csv` | While **Record log** is on | Every event |
+| `%LOCALAPPDATA%\DriveMonitor\settings.json` | The app exits, or Windows logs off or shuts down | Filters, options, drive choices, window position; written through `settings.json.tmp`, and not at all when the folder or either file is a junction, a symbolic link or a hard link |
+| `%LOCALAPPDATA%\DriveMonitor\settings.bad.json` | The app could not start | `settings.json`, moved aside so that the next start uses the defaults |
+| `%LOCALAPPDATA%\DriveMonitor\errors.log` | An unexpected error in the app | Time, context and exception details, which can include paths; emptied and started again once it exceeds 1 MiB; not written when the folder or the file is a junction, a symbolic link or a hard link |
+| `%LOCALAPPDATA%\DriveMonitor\Logs\activity-YYYYMMDD-HHMMSS.csv`, then `.002.csv` and so on | While **Record log** is on | Every event; a new file every 100 MB, and beyond 10 files the oldest of the same recording are deleted |
 | The file you choose | **Export** in the app | The exported table |
-| The file after `--csv` | `drivemon` | Every event |
+| The file after `--csv`, and numbered files beside it (`.002` and so on) | `drivemon` | Every event, with the same limits as the Record log |
 | The file after `--report` | `drivemon --self-test` | The self-test report |
-| `X:\.drivemonitor-selftest-<process id>\` | `drivemon --self-test X:` | Test files, deleted when the test ends |
+| `X:\.drivemonitor-selftest-<16 random hexadecimal digits>\` | `drivemon --self-test X:` | Test files. Where the file system has access lists (not FAT or exFAT), only administrators and SYSTEM can change the folder. The test deletes the files it created, then the folder if it is empty |
 
 DriveMonitor's code writes no other files, on the drives it watches or anywhere else.
 
