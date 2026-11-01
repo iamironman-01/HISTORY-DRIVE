@@ -570,8 +570,9 @@ faulted session is never restarted once the engine is disposed, and calling `Dis
 `StartLog` also throws `ObjectDisposedException` once the engine is disposed, before it creates anything. A
 log that it is still creating when `Dispose` runs (for example when the window closes while **Record log**
 starts) does not stay open either: `Dispose` marks the engine before its own `StopLog`, and both swap the
-current log atomically, so either that `StopLog` ends the new log, or `StartLog`, which looks at the mark
-again once it has swapped the log in, ends it itself and throws `ObjectDisposedException`.
+current log atomically, so either that `StopLog` ends the new log or `StartLog`, which looks at the mark
+again once it has swapped the log in, sees it. When it sees the mark, `StartLog` ends the log itself if
+`Dispose` has not, and then throws `ObjectDisposedException`.
 
 ### The cross-process guard
 
@@ -680,8 +681,8 @@ still running then can leave its kernel session behind, because `Start` subscrib
 its end; the next start with the same session name replaces that session.
 
 Not waited for: an export, or a **Record log** start, that is still running when the window closes. The log
-that such a start creates does not stay open: `Dispose` ends it, or `StartLog` closes it itself and throws
-`ObjectDisposedException` (see [Dispose](#dispose)).
+that such a start creates does not stay open: `Dispose` or `StartLog` ends it, and a `StartLog` that finds
+the engine disposed throws `ObjectDisposedException` (see [Dispose](#dispose)).
 After a fatal error, `EmergencyStop` still disposes the engine on the calling thread, the UI thread included,
 because the process ends right after it and the kernel session has to be stopped first; with a log on a slow
 drive the window can stop responding for up to about 40 seconds before the error message appears.
@@ -781,7 +782,7 @@ exhaust memory or fill a drive.
   true, so that a missing folder is created in the same step), refuses it as `Open` refuses its folder, and
   keeps each parent open, without `FILE_SHARE_DELETE`, until its child is open. The error names the first link
   on the way, such as *'...\DriveMonitor' is a junction, symbolic link or other reparse point; it is not
-  followed.*, and a file where a folder should be gives *'\<path>' is not a folder.* A path that is not below
+  followed.*, and a file where a folder should be gives *'\<path>' is not a folder.* A path that is outside
   the root once `..` is resolved, that keeps a `.`, `..` or empty name (as an extended `\\?\` path does), or
   that has a name no folder can have, throws `ArgumentException` before anything is opened; the comparison
   ignores case and needs a separator after the root, so `LocalLow` is not below `Local`. The folder that
