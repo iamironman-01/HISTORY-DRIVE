@@ -3,7 +3,14 @@ namespace DriveMonitor.Core;
 /// <summary>Settings for <see cref="MonitorEngine"/>. Only <see cref="ExcludeOwnProcess"/> may change while running.</summary>
 public sealed class MonitorOptions
 {
+    /// <summary>How often TraceEvent has Windows hand over buffered events when <see cref="FlushIntervalMs"/> is 0.</summary>
+    private const int TraceEventFlushMs = 1000;
+
+    /// <summary>What <see cref="ReorderWindowMs"/> adds to the flush interval by default, for timer and consumer delays.</summary>
+    private const int ReorderMarginMs = 250;
+
     private volatile bool _excludeOwnProcess = true;
+    private int? _reorderWindowMs;
 
     /// <summary>
     /// ETW session name. Starting replaces a leftover session with the same name (for example
@@ -37,6 +44,20 @@ public sealed class MonitorOptions
     /// once a second; 0 keeps that default.
     /// </summary>
     public int FlushIntervalMs { get; set; } = 500;
+
+    /// <summary>
+    /// How long (ms) events are held so that they are matched with their completions in the order the kernel
+    /// logged them. Windows hands over each processor's buffer separately, so events arrive out of order, by
+    /// up to the flush interval; in arrival order a recycled request address can pair an operation with another
+    /// one's completion. By default <see cref="FlushIntervalMs"/> (1,000 ms when that is 0) plus 250 ms, so
+    /// 750 ms; events reach <see cref="MonitorEngine.DrainEvents"/> that much later. 0 turns reordering off:
+    /// events are matched in the order they arrive. Not used without <see cref="UseCompletionEvents"/>.
+    /// </summary>
+    public int ReorderWindowMs
+    {
+        get => _reorderWindowMs ?? (FlushIntervalMs > 0 ? FlushIntervalMs : TraceEventFlushMs) + ReorderMarginMs;
+        set => _reorderWindowMs = value;
+    }
 
     /// <summary>
     /// Ask Windows for the names of files that are already open when monitoring starts; otherwise

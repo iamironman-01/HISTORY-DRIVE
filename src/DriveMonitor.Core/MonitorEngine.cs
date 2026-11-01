@@ -15,9 +15,9 @@ namespace DriveMonitor.Core;
 /// Watches every file read, write, create, delete and rename on the monitored drives.
 /// </summary>
 /// <remarks>
-/// Pipeline: kernel ETW session (whole system) → drive/process filter → completion matching →
-/// classification → statistics, optional CSV log, and a queue that the UI or CLI drains with
-/// <see cref="DrainEvents"/>. Requires administrator rights.
+/// Pipeline: kernel ETW session (whole system) → drive/process filter → reordering by timestamp →
+/// completion matching → classification → statistics, optional CSV log, and a queue that the UI or CLI
+/// drains with <see cref="DrainEvents"/>. Requires administrator rights.
 /// </remarks>
 public sealed class MonitorEngine : IDisposable, IFileIoSink
 {
@@ -35,7 +35,7 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     private readonly Action<PendingIo> _publish;
     private readonly int _ownProcessId = Environment.ProcessId;
     private readonly Queue<long> _restartTicks = new();
-    private volatile Sources _sources = new(null, 0, 0, 0, null);
+    private volatile Sources _sources = new(null, 0, 0, 0, null, 0);
     private Semaphore? _sessionGuard;
     private Timer? _releaseTimer;
     private CsvActivityLog? _log;
@@ -50,7 +50,8 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
 
     /// <summary>The running source plus totals of sources that already ended (restarts), swapped as one unit.</summary>
     private sealed record Sources(
-        EtwFileIoSource? Current, int RetiredLost, long RetiredKernelEvents, long RetiredCallbackErrors, string? RetiredLastError);
+        EtwFileIoSource? Current, int RetiredLost, long RetiredKernelEvents, long RetiredCallbackErrors, string? RetiredLastError,
+        long RetiredReorderOverflows);
 
     public MonitorEngine(MonitorOptions? options = null)
     {
@@ -130,6 +131,19 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     }
 
     public string? LastCallbackError => _sources.Current?.LastCallbackError ?? _sources.RetiredLastError;
+
+    /// <summary>
+    /// Events passed on for matching before <see cref="MonitorOptions.ReorderWindowMs"/> was over because the reorder
+    /// buffer was full; like events that Windows delivers later than the window, they may be matched out of order.
+    /// </summary>
+    public long ReorderOverflows
+    {
+        get
+        {
+            Sources s = _sources;
+            return s.RetiredReorderOverflows + (s.Current?.ReorderOverflows ?? 0);
+        }
+    }
 
     /// <summary>How often the kernel session was restarted after stopping unexpectedly.</summary>
     public int Restarts => Volatile.Read(ref _restarts);
@@ -377,7 +391,10 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
         return source;
     }
 
-    /// <summary>Stops a source (draining its last events) and folds its counters into the retired totals.</summary>
+    /// <summary>
+    /// Stops a source (draining its last events, and its reorder buffer into the correlator) and folds its counters
+    /// into the retired totals. The callers' final release comes after, so it finds everything.
+    /// </summary>
     private void RetireSource(EtwFileIoSource source)
     {
         source.Dispose();
@@ -387,7 +404,8 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
             s.RetiredLost + source.EventsLost,
             s.RetiredKernelEvents + source.KernelEvents,
             s.RetiredCallbackErrors + source.CallbackErrors,
-            source.LastCallbackError ?? s.RetiredLastError);
+            source.LastCallbackError ?? s.RetiredLastError,
+            s.RetiredReorderOverflows + source.ReorderOverflows);
     }
 
     private void ReleaseDue(bool flushAll)

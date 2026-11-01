@@ -8,7 +8,12 @@ using Microsoft.Diagnostics.Tracing.Session;
 
 namespace DriveMonitor.Core.Tracing;
 
-/// <summary>Receives FileIo events from <see cref="EtwFileIoSource"/> on the ETW consumer thread.</summary>
+/// <summary>
+/// Receives FileIo events from <see cref="EtwFileIoSource"/>. <see cref="TryAccept"/> is called on the ETW consumer
+/// thread as each event arrives. The other calls come one at a time: through a <see cref="ReorderBuffer"/>, in the
+/// order the events were logged, on the consumer thread, the buffer's timer or the thread that stops the source;
+/// with reordering off, in arrival order on the consumer thread.
+/// </summary>
 internal interface IFileIoSink
 {
     /// <summary>
@@ -39,11 +44,17 @@ internal interface IFileIoSink
 /// <see cref="IFileIoSink"/>. Events arrive for the whole system; the sink filters them.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Built around how TraceEvent 4.0 behaves (verified in its source): the kernel provider must be
 /// enabled before <c>session.Source</c> is first read; <c>session.Source</c> must never be read
 /// after Dispose (that silently starts a new session); an exception escaping a callback ends the
 /// session; TraceEvent forgets a FileObject's name at Cleanup and a FileKey's name at rundown,
 /// so this class keeps its own name tables as a fallback.
+/// </para>
+/// <para>
+/// When completions are matched, events reach the sink through a <see cref="ReorderBuffer"/>, in the order they
+/// were logged (<see cref="MonitorOptions.ReorderWindowMs"/>); <see cref="Stop"/> passes on what it still holds.
+/// </para>
 /// </remarks>
 internal sealed class EtwFileIoSource : IDisposable
 {
@@ -67,6 +78,7 @@ internal sealed class EtwFileIoSource : IDisposable
     private const int EventsLostPollMs = 1000;
 
     private readonly IFileIoSink _sink;
+    private readonly ReorderBuffer? _reorder;
     private readonly ProcessNameCache _processNames;
     private readonly Func<string, string> _toDosPath;
     private readonly MonitorOptions _options;
@@ -88,10 +100,15 @@ internal sealed class EtwFileIoSource : IDisposable
 
     public EtwFileIoSource(IFileIoSink sink, ProcessNameCache processNames, Func<string, string> toDosPath, MonitorOptions options)
     {
-        _sink = sink;
         _processNames = processNames;
         _toDosPath = toDosPath;
         _options = options;
+
+        // Matching a completion needs the starts and ends on its request address in the order they were logged,
+        // which is not the order they arrive in. Without completion events nothing is matched or held back.
+        if (options.UseCompletionEvents && options.ReorderWindowMs > 0)
+            _reorder = new ReorderBuffer(sink, options.ReorderWindowMs, RecordCallbackError);
+        _sink = (IFileIoSink?)_reorder ?? sink;
     }
 
     /// <summary>Raised on the consumer thread when the session ends without <see cref="Stop"/> being called.</summary>
@@ -107,6 +124,12 @@ internal sealed class EtwFileIoSource : IDisposable
 
     /// <summary>True once Windows has delivered at least one FileIo_PathOperation event.</summary>
     public bool PathOperationsSeen => _pathOperationsSeen;
+
+    /// <summary>Events passed on for matching before the reorder window was over, because the reorder buffer was full.</summary>
+    public long ReorderOverflows => _reorder?.Overflows ?? 0;
+
+    /// <summary>The sink the event callbacks report to: the reorder buffer, or the sink this source was given.</summary>
+    internal IFileIoSink Sink => _sink;
 
     /// <summary>Whether the request for names of already-open files was accepted (not whether Windows acted on it).</summary>
     public bool RundownRequested { get; private set; }
@@ -206,9 +229,18 @@ internal sealed class EtwFileIoSource : IDisposable
             _session = null;
         }
 
-        if (session is null)
-            return;
+        if (session is not null)
+            EndSession(session);
 
+        // The consumer has delivered its last event: pass on, in the order they were logged, the events the reorder
+        // buffer still holds, before the engine releases what waits for a completion. Should the consumer not have
+        // stopped, what it delivers later goes straight through.
+        _reorder?.Dispose();
+    }
+
+    /// <summary>Stops the session and waits for the consumer thread to deliver what the kernel still holds.</summary>
+    private void EndSession(TraceEventSession session)
+    {
         // Stop first: the kernel then delivers what is still buffered and Process() returns by itself.
         // Dispose closes the consumer and discards undelivered events, so it comes after the drain.
         try

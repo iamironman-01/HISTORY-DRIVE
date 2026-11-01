@@ -27,6 +27,15 @@ namespace DriveMonitor.Core.Tracing;
 /// to help, so that mismatch remains possible.
 /// </para>
 /// <para>
+/// The engine's events pass through a <see cref="ReorderBuffer"/>, which delivers them in timestamp order:
+/// every start on an address then arrives before the completions and paths logged after it, each address
+/// alternates start and end, and the rule reduces to pairing a completion with the latest start before it.
+/// The early stores, the reuse bound and the out-of-order inserts remain as the safety net for events that
+/// Windows delivered later than the reorder window, for a reorder buffer that was full, and for reordering
+/// turned off. Events with equal timestamps arrive in their delivery order; a completion logged in the same
+/// tick as a start counts as logged at or after it, here and in the early stores alike.
+/// </para>
+/// <para>
 /// Every completion in the system passes through here, and recycling puts thousands of them on a
 /// few hot addresses, so nothing walks a whole per-address chain. Each address's waiting operations
 /// and stored values are doubly linked and sorted by timestamp: one leaves in constant time, a lookup

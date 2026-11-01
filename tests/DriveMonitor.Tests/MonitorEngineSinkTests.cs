@@ -7,13 +7,16 @@ namespace DriveMonitor.Tests;
 
 /// <summary>
 /// Drives <see cref="MonitorEngine"/> through its internal <see cref="IFileIoSink"/> side, the way
-/// the ETW source calls it, without starting a kernel session (so no elevation is needed).
+/// the ETW source calls it, without starting a kernel session (so no elevation is needed). The source
+/// reports through a <see cref="ReorderBuffer"/>, which passes events on in timestamp order; most tests
+/// call the engine directly, as the buffer does, and the "Reordered" tests go through a buffer.
 /// </summary>
 public sealed class MonitorEngineSinkTests
 {
     private const int OtherProcessId = 4242;
     private const string FileOnE = @"E:\photos\img_0042.jpg";
     private const int StatusObjectNameNotFound = unchecked((int)0xC0000034);
+    private const int ReorderWindowMs = 750;
 
     [Fact]
     public void NewEngine_IsIdle()
@@ -466,6 +469,201 @@ public sealed class MonitorEngineSinkTests
         Assert.Equal(1, engine.DrainEvents(events));
         Assert.Equal(@"E:\photos\new.jpg", Assert.Single(events).TargetPath);
     }
+
+    // ---- events delivered out of timestamp order, put back in order by the reorder buffer ----
+
+    [Fact]
+    public void Reordered_CompletionOfANewerUseArrivingFirst_GoesToTheLaterRead()
+    {
+        // Two reads on E: use address 0x10 in turn: the first starts at qpc 100 and completes at 200 with 1 KB, the
+        // second starts at 300 and completes at 400 with 2 KB. The second completion sits in the buffer Windows hands
+        // over first. In arrival order the first read took it and the second one ended Unknown.
+        using MonitorEngine engine = CreateEngine();
+        using ReorderBuffer buffer = Reordering(engine);
+        buffer.OnComplete(0x10, timestampQpc: 400, extraInfo: 2048, ntStatus: 0, nowTick: 0);
+        buffer.OnBegin(Read(irp: 0x10, qpc: 100, size: 4096), nowTick: 400);
+        buffer.OnBegin(Read(irp: 0x10, qpc: 300, size: 4096), nowTick: 400);
+        buffer.OnComplete(0x10, timestampQpc: 200, extraInfo: 1024, ntStatus: 0, nowTick: 400);
+
+        var events = new List<FileActivityEvent>();
+        Assert.Equal(0, engine.DrainEvents(events)); // still held
+        buffer.Release(nowTick: 400 + ReorderWindowMs);
+
+        Assert.Equal(2, engine.DrainEvents(events));
+        Assert.Equal(new[] { 1024L, 2048L }, events.Select(e => e.Bytes));
+        Assert.All(events, e => Assert.Equal(IoStatus.Success, e.Status));
+        Assert.Equal(0, engine.PendingCompletions);
+    }
+
+    [Fact]
+    public void Reordered_LateOpen_DoesNotTakeTheResultOfAForeignCreateWhoseStartArrivesAfterIt()
+    {
+        // An open on E: (qpc 100, address 0x30) completes at 150: the file existed. A create on C: then reuses the
+        // address at 250 and makes a new file at 300. That result arrives first; the open, the create's start and the
+        // open's own completion come in a buffer flushed later. In arrival order the open took the create's result
+        // and was reported as "created".
+        using MonitorEngine engine = CreateEngine();
+        using ReorderBuffer buffer = Reordering(engine);
+        buffer.OnComplete(0x30, timestampQpc: 300, extraInfo: FileIoClassifier.FileCreated, ntStatus: 0, nowTick: 0);
+        buffer.OnBegin(Open(irp: 0x30, qpc: 100), nowTick: 400);
+        buffer.OnForeignBegin(0x30, timestampQpc: 250, nowTick: 400);
+        buffer.OnComplete(0x30, timestampQpc: 150, extraInfo: FileIoClassifier.FileOpened, ntStatus: 0, nowTick: 400);
+
+        buffer.Release(nowTick: 400 + ReorderWindowMs);
+
+        var events = new List<FileActivityEvent>();
+        Assert.Equal(1, engine.DrainEvents(events));
+        FileActivityEvent ev = Assert.Single(events);
+        Assert.Equal(FileOperation.Open, ev.Operation);
+        Assert.Equal(IoStatus.Success, ev.Status);
+        Assert.Null(ev.Detail);
+    }
+
+    [Fact]
+    public void Reordered_LateRead_DoesNotTakeTheFailureOfAForeignReuseWhoseStartArrivesAfterIt()
+    {
+        // A 4 KB read on E: (qpc 110, address 0x10) completes at 120. An open of a missing C: file reuses the address
+        // at 130 and fails at 140. The failure arrives first; the read, the open's start and the read's completion come
+        // in a buffer flushed later. In arrival order the read was published as failed with 0 bytes.
+        using MonitorEngine engine = CreateEngine();
+        using ReorderBuffer buffer = Reordering(engine);
+        buffer.OnComplete(0x10, timestampQpc: 140, extraInfo: 0, ntStatus: StatusObjectNameNotFound, nowTick: 0);
+        buffer.OnBegin(Read(irp: 0x10, qpc: 110, size: 4096), nowTick: 400);
+        buffer.OnForeignBegin(0x10, timestampQpc: 130, nowTick: 400);
+        buffer.OnComplete(0x10, timestampQpc: 120, extraInfo: 4096, ntStatus: 0, nowTick: 400);
+
+        buffer.Release(nowTick: 400 + ReorderWindowMs);
+
+        var events = new List<FileActivityEvent>();
+        Assert.Equal(1, engine.DrainEvents(events));
+        FileActivityEvent ev = Assert.Single(events);
+        Assert.Equal(IoStatus.Success, ev.Status);
+        Assert.Equal(4096L, ev.Bytes);
+        Assert.Equal(0L, engine.Stats.FailedEvents);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Reordered_ReadAndItsCompletionLoggedInTheSameTick_AreMatchedWhicheverArrivesFirst(bool completionFirst)
+    {
+        // Equal timestamps keep their arrival order, and the correlator counts a completion logged in the same tick as
+        // its start as logged at or after it, whether it meets the start directly or in the early store.
+        using MonitorEngine engine = CreateEngine();
+        using ReorderBuffer buffer = Reordering(engine);
+        if (completionFirst)
+            buffer.OnComplete(0x10, timestampQpc: 100, extraInfo: 4096, ntStatus: 0, nowTick: 0);
+        buffer.OnBegin(Read(irp: 0x10, qpc: 100, size: 4096), nowTick: 0);
+        if (!completionFirst)
+            buffer.OnComplete(0x10, timestampQpc: 100, extraInfo: 4096, ntStatus: 0, nowTick: 0);
+
+        buffer.Release(nowTick: ReorderWindowMs);
+
+        var events = new List<FileActivityEvent>();
+        Assert.Equal(1, engine.DrainEvents(events));
+        Assert.Equal(IoStatus.Success, events[0].Status);
+        Assert.Equal(4096L, events[0].Bytes);
+    }
+
+    [Fact]
+    public void Reordered_ReadDeliveredLaterThanTheWindow_StillTakesItsCompletion()
+    {
+        // A flush delayed on a busy system: the completion was passed on long before its read arrived. The read is passed
+        // on at once, and the correlator's early store, kept as the safety net, pairs them.
+        using MonitorEngine engine = CreateEngine();
+        using ReorderBuffer buffer = Reordering(engine);
+        buffer.OnComplete(0x10, timestampQpc: 150, extraInfo: 4096, ntStatus: 0, nowTick: 0);
+        buffer.Release(nowTick: ReorderWindowMs);
+        Assert.Equal(0, buffer.Count);
+
+        buffer.OnBegin(Read(irp: 0x10, qpc: 100, size: 4096), nowTick: ReorderWindowMs + 400);
+
+        var events = new List<FileActivityEvent>();
+        Assert.Equal(1, engine.DrainEvents(events));
+        Assert.Equal(IoStatus.Success, events[0].Status);
+        Assert.Equal(4096L, events[0].Bytes);
+    }
+
+    [Fact]
+    public void Reordered_ShuffledDeliveryOnRecycledAddresses_MatchesEveryReadWithItsOwnCompletion()
+    {
+        // Three request addresses serve 6,000 operations in turn, each one used about every 30 µs; half the operations
+        // are reads on E:, half are on other drives and fail. Each processor's events stay in order, but its buffer
+        // arrives up to 499 ms late, within the 750 ms window. 100 qpc = 1 ms.
+        var random = new Random(20261031);
+        var logged = new List<(long Qpc, ulong Irp, int Op, bool IsStart, bool Monitored)>();
+        var inUse = new (int Op, bool Monitored)?[3];
+        long qpc = 0;
+        int operations = 0;
+        while (operations < 6000 || inUse.Any(use => use is not null))
+        {
+            qpc += random.Next(1, 20);
+            int slot = random.Next(inUse.Length);
+            ulong irp = 0xFFFF_9A00_0000_1000UL + ((ulong)slot * 0x100);
+            if (inUse[slot] is { } use)
+            {
+                logged.Add((qpc, irp, use.Op, false, use.Monitored));
+                inUse[slot] = null;
+            }
+            else if (operations < 6000)
+            {
+                bool monitored = random.Next(2) == 0;
+                logged.Add((qpc, irp, operations, true, monitored));
+                inUse[slot] = (operations++, monitored);
+            }
+        }
+
+        var lastArrival = new long[4];
+        var arrivals = new List<(long Tick, int Index)>();
+        for (int i = 0; i < logged.Count; i++)
+        {
+            int cpu = random.Next(lastArrival.Length);
+            lastArrival[cpu] = Math.Max(lastArrival[cpu], (logged[i].Qpc / 100) + random.Next(500));
+            arrivals.Add((lastArrival[cpu], i));
+        }
+
+        using MonitorEngine engine = CreateEngine();
+        using ReorderBuffer buffer = Reordering(engine);
+        foreach ((long tick, int index) in arrivals.OrderBy(a => a.Tick))
+        {
+            (long at, ulong irp, int op, bool isStart, bool monitored) = logged[index];
+            if (isStart && monitored)
+                buffer.OnBegin(Copy(irp, at, op), tick);
+            else if (isStart)
+                buffer.OnForeignBegin(irp, at, tick);
+            else if (monitored)
+                buffer.OnComplete(irp, at, extraInfo: (ulong)op + 1, ntStatus: 0, tick);
+            else
+                buffer.OnComplete(irp, at, extraInfo: 0, ntStatus: StatusObjectNameNotFound, tick);
+        }
+
+        buffer.Release(lastArrival.Max() + ReorderWindowMs);
+
+        var events = new List<FileActivityEvent>();
+        engine.DrainEvents(events);
+        Assert.Equal(logged.Count(e => e.IsStart && e.Monitored), events.Count);
+        Assert.All(events, ev =>
+        {
+            Assert.Equal(IoStatus.Success, ev.Status);
+            Assert.Equal($@"E:\copy\{ev.Bytes - 1}.bin", ev.Path); // its own completion carried its number
+        });
+        Assert.Equal(0, engine.PendingCompletions);
+    }
+
+    /// <summary>A read of 1 MiB on E: whose path carries its number.</summary>
+    private static PendingIo Copy(ulong irp, long qpc, int op)
+    {
+        PendingIo io = Read(irp, qpc, size: 1 << 20);
+        io.Path = $@"E:\copy\{op}.bin";
+        return io;
+    }
+
+    /// <summary>
+    /// The engine behind a reorder buffer, the way <see cref="EtwFileIoSource"/> reports to it; the tests pass the time
+    /// themselves.
+    /// </summary>
+    private static ReorderBuffer Reordering(MonitorEngine engine) =>
+        new(engine, ReorderWindowMs, error => Assert.Fail($"The engine threw: {error}"), releaseOnTimer: false);
 
     private static MonitorEngine CreateEngine(MonitorOptions? options = null)
     {
