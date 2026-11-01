@@ -136,9 +136,10 @@ public sealed class SettingsStore
     }
 
     /// <summary>
-    /// <c>%LOCALAPPDATA%</c>, which holds every file the app writes. The elevated app trusts its path, which an
-    /// administrator may have redirected, but follows no link below it (<see cref="LinkSafeFolder.OpenBelow"/>):
-    /// the user's own programs can put one there.
+    /// <c>%LOCALAPPDATA%</c>, which holds every file the app writes. The elevated app trusts its path as Windows
+    /// reports it, which the user can redirect without administrator rights (the <c>Local AppData</c> value under
+    /// HKCU's User Shell Folders), but follows no link below it (<see cref="LinkSafeFolder.OpenBelow"/>): the
+    /// user's own programs can put one there.
     /// </summary>
     public static string TrustedRoot { get; } = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 

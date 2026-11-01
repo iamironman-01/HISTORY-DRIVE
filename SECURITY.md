@@ -46,6 +46,11 @@ publishes from `main` is the supported one.
 - File names on a pendrive are chosen by whoever wrote to it. When DriveMonitor writes CSV, text that starts
   with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading apostrophe, so that spreadsheet programs
   do not evaluate it as a formula, and fields are quoted as RFC 4180 requires.
+- Process names can be chosen too: whoever starts a program writes its command line, and a program's file
+  name may hold characters that change how text is shown. DriveMonitor replaces control characters and
+  bidirectional formatting characters in every process name with `?`, so that a name cannot fake a line or
+  read as another name in the app, the CSV files or `drivemon`'s output. `drivemon` does the same for the
+  paths and messages it prints in live monitoring.
 
 ## The privileges it needs, and why
 
@@ -64,9 +69,9 @@ publishes from `main` is the supported one.
     the same session;
   - for the app, a named mutex, `Local\DriveMonitor.App.SingleInstance`, that keeps to one window per
     Windows session.
-- If the process is killed, Windows keeps its kernel session running until DriveMonitor starts again with
-  the same session name, someone stops it with `logman stop <name> -ets`
-  (see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)), or Windows restarts.
+- If the process is killed, or Windows logs off while the app is still starting monitoring, Windows keeps the
+  kernel session running until DriveMonitor starts again with the same session name, someone stops it with
+  `logman stop <name> -ets` (see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)), or Windows restarts.
 - **Other calls into Windows** include `QueryDosDevice` to map volumes to drive letters; a volume handle opened with
   no access rights to read the bus type and model (`IOCTL_STORAGE_QUERY_PROPERTY`); `OpenProcess` with
   `PROCESS_QUERY_LIMITED_INFORMATION` to name a process the trace did not name; `explorer.exe` for **Open
@@ -76,16 +81,40 @@ publishes from `main` is the supported one.
 
 | Path | When | Contents |
 | --- | --- | --- |
-| `%LOCALAPPDATA%\DriveMonitor\settings.json` | The app exits, or Windows logs off or shuts down | Filters, options, drive choices, window position; written through `settings.json.tmp`, and not at all when the folder or either file is a junction, a symbolic link or a hard link |
-| `%LOCALAPPDATA%\DriveMonitor\settings.bad.json` | The app could not start | `settings.json`, moved aside so that the next start uses the defaults |
+| `%LOCALAPPDATA%\DriveMonitor\settings.json` | The app exits, or Windows logs off or shuts down | Filters, options, drive choices, window position; written through `settings.json.tmp`, and not at all when the folder or either file is a junction, a symbolic link or a hard link. Not read either when the folder or `settings.json` is one: the app then starts with the defaults |
+| `%LOCALAPPDATA%\DriveMonitor\settings.bad.json` | The app could not start | `settings.json`, renamed so that the next start uses the defaults; not renamed when the folder or either file is a junction, a symbolic link or a hard link |
 | `%LOCALAPPDATA%\DriveMonitor\errors.log` | An unexpected error in the app | Time, context and exception details, which can include paths; emptied and started again once it exceeds 1 MiB; not written when the folder or the file is a junction, a symbolic link or a hard link |
-| `%LOCALAPPDATA%\DriveMonitor\Logs\activity-YYYYMMDD-HHMMSS.csv`, then `.002.csv` and so on | While **Record log** is on | Every event; a new file every 100 MB, and beyond 10 files the oldest of the same recording are deleted |
+| `%LOCALAPPDATA%\DriveMonitor\Logs\activity-YYYYMMDD-HHMMSS.csv`, then `.002.csv` and so on | While **Record log** is on | Every event; a new file every 100 MB, and beyond 10 files the oldest of the same recording are deleted; not written when `DriveMonitor` or `Logs` is a junction, a symbolic link or a mount point, or a file's name is taken by a link, a folder or a hard-linked file |
 | The file you choose | **Export** in the app | The exported table |
-| The file after `--csv`, and numbered files beside it (`.002` and so on) | `drivemon` | Every event, with the same limits as the Record log |
+| The file after `--csv`, and numbered files beside it (`.002` and so on) | `drivemon` | Every event, with the same limits as the Record log; not written when the file's folder is a junction or a symbolic link, or a file's name is taken by a link, a folder or a hard-linked file. Links in the folders above it are followed |
 | The file after `--report` | `drivemon --self-test` | The self-test report |
 | `X:\.drivemonitor-selftest-<16 random hexadecimal digits>\` | `drivemon --self-test X:` | Test files. Where the file system has access lists (not FAT or exFAT), only administrators and SYSTEM can change the folder. The test deletes the files it created, then the folder if it is empty |
 
 DriveMonitor's code writes no other files, on the drives it watches or anywhere else.
+
+It writes these files as administrator, in folders that other programs, and on a pendrive or a share other
+users, may be able to change, so a link planted there must not redirect its reads, writes, truncations,
+renames or deletes. The app opens `%LOCALAPPDATA%` by its path, and `DriveMonitor` and `Logs` below it each
+relative to the folder above, never by path; when it writes, it creates a missing one in the same step.
+`drivemon` creates and opens the folder of a `--csv` file by its path. A folder that is a junction, a
+symbolic link, a mount point or another reparse point is refused there, not followed. Each folder on the way
+is kept open until the next one is open, and the folder in use until DriveMonitor is done with it, so that
+nobody can rename, delete or replace them meanwhile. DriveMonitor then reads, writes, renames and deletes
+each file relative to that open folder, not by path, and refuses a name that is a link, a folder or a file
+with more than one name (a hard link). The checks are made on the open handles, so nothing can be swapped in
+between a check and the use. FAT and exFAT have no links; on a network share the checks rest on the server.
+An export and the `--report` file are written by path, to the file you name.
+
+One limit remains for the app: it trusts `%LOCALAPPDATA%` as Windows reports it, and follows a link at that
+folder or above it. You, or any program running as you, can redirect it without administrator rights, through
+the value `Local AppData` under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders`. DriveMonitor follows that
+redirection, then follows no link below it. Such a program can therefore choose the folder in which the app
+creates `DriveMonitor` as administrator, but not the names the app writes there, which the app chooses:
+`DriveMonitor`, `Logs` and the `%LOCALAPPDATA%` files in the table above. The log empties an existing file
+only when it is a plain file with exactly the name of one of the log's files, and deletes only files it has
+used as parts of the log. For a `--csv` file, the folders above its own folder are followed, since you choose
+that path; only that folder and the file names are checked.
 
 ## Supply chain
 

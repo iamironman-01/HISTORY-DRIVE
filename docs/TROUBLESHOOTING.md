@@ -102,7 +102,17 @@ it was killed. The app and `drivemon` use different names, so they can run side 
 
 Another program can hold the guard while no DriveMonitor runs: a stale guard, or one created to keep
 DriveMonitor from monitoring. Then no session with that name is running, so DriveMonitor waits up to 2
-seconds for one to appear and starts monitoring without the guard. The app and `drivemon` do not say so.
+seconds for one to appear and starts monitoring without the guard. It says so: the app in an amber banner,
+and `drivemon` in a line on stderr after the start (the self-test prints it after `Session started in N ms`,
+and leaves it out of the `--report` file). For the app it reads:
+
+```text
+Another program holds Global\DriveMonitor.Session.DriveMonitor-FileIO, which keeps two DriveMonitors from sharing the session "DriveMonitor-FileIO", but no such session is running, so monitoring started anyway.
+```
+
+Monitoring works normally. While that program holds the guard, a DriveMonitor started later with the same
+session name still finds this one by its session and refuses. The banner goes when monitoring stops, and a
+later start shows no warning once the program has released the guard or ended.
 
 Related messages:
 
@@ -121,8 +131,10 @@ Windows has no free kernel trace session: other tracing tools (Windows Performan
 
 **Cause.** DriveMonitor's session is a kernel "system logger" session. Windows runs at most eight of them,
 and two of the slots are reserved, so a few other tracing tools can use up the rest. Starting a session then
-fails with `ERROR_NO_SYSTEM_RESOURCES` (`0x800705AA`). DriveMonitor sessions left behind by a DriveMonitor
-that was killed count too: Windows keeps a trace session running after the process that started it ends.
+fails with `ERROR_NO_SYSTEM_RESOURCES` (`0x800705AA`). DriveMonitor sessions left behind count too: Windows
+keeps a trace session running after the process that started it ends. That happens when a DriveMonitor is
+killed, and when Windows logs off while the app is still starting monitoring, because the app then waits at
+most 3 seconds before it exits.
 
 **Inspect** the running sessions from an administrator terminal:
 
@@ -216,9 +228,12 @@ program. With `drivemon`, write the events to a CSV file with `--csv` and filter
 ## Events appear late, or not at all
 
 **Late.** A delay of about a second is normal: Windows hands over kernel events in batches, DriveMonitor asks
-for one every 500 ms, and the window refreshes every 250 ms (`drivemon` prints every 200 ms). Events are
-published in the order the operations started, so an operation still waiting for its completion can hold
-back the ones after it for up to 2 more seconds.
+for one every 500 ms and holds each event back for up to about 750 ms, so that it can match the events in
+the order the kernel logged them, and the window refreshes every 250 ms (`drivemon` prints every 200 ms).
+Events therefore usually appear 0.75 to 1.6 seconds after they happen. They are published in the order the
+operations started, so an operation still waiting for its completion can hold back the ones after it for up
+to 2 more seconds. For the same reason, events from about the last second before you turn **Record log** off
+or click **Clear** arrive after it: the log does not get them, and the cleared totals count them.
 
 **Not at all.** Check that:
 
@@ -235,9 +250,16 @@ back the ones after it for up to 2 more seconds.
 - it is not on a network drive: network drives are off by default, and DriveMonitor converts network paths
   to the `\\server\share` form rather than to drive letters, so they do not match a ticked network drive.
 
-A rename that shows only the old name ("renamed or moved") means no event with the new name arrived in time.
-If the diagnostics say *Windows reports new names of renamed files: not seen yet*, Windows has not sent any
-such event since monitoring started.
+A rename that shows only the old name ("renamed or moved") means that no event with the new name arrived in
+time, or that the new name it brought was on another drive. A rename cannot leave its drive, so such a name
+belongs to another operation, and DriveMonitor drops it. If the diagnostics say *Windows reports new names of
+renamed files: not seen yet*, Windows has not sent any such event since monitoring started.
+
+A folder's delete or rename shows as a folder's (`folder` in Live activity, `Directory` in the Flags column of
+the CSV files) only when DriveMonitor already knows the path as a folder: opened or created as one, listed,
+or the new name of a renamed folder, since DriveMonitor started or since the last **Clear**. Windows reports
+a delete or rename without saying that it is a folder's, so a folder that DriveMonitor has not seen that way,
+such as one that existed before monitoring started and was not opened or listed since, shows as a file.
 
 ## The activity log stops, or is split into several files
 
@@ -260,8 +282,16 @@ The app's **Record log** and `drivemon --csv` write the same activity log, with 
 
   While recording, a banner says *The activity log stopped:* with the reason, and **Record log** turns off.
 - **`drivemon`:** when the file cannot be created at the start, it prints `Cannot write the CSV file:` with
-  the reason and exits with code 1 before monitoring starts. A log that stops during the run is not
-  reported: monitoring and the printed lines go on, and the CSV file ends at that point.
+  the reason and exits with code 1 before monitoring starts. When the log stops during the run, it says so on
+  stderr and goes on monitoring and printing events; the CSV file ends at that point:
+
+  ```text
+  The CSV log stopped: Only 300 MB is free on E:\; the activity log stops when less than 512 MB is left. 1,234 rows were written to E:\logs\activity.csv; later events are not logged.
+  ```
+
+  The last line of the summary, `CSV log: ...`, then ends with `error:` and the reason, and `drivemon` exits
+  with code 1. A failure while `drivemon` writes the last rows is reported once the log is closed, also with
+  `--no-summary`, in a line that ends `... and <n> were dropped.`
 
 Other write errors stop the log in the same way: the drive was removed or is full, or the network share went
 away.
@@ -275,9 +305,48 @@ away.
 - With `drivemon`, write the file to a drive with more room (`--csv D:\activity.csv`), and use a new file name
   for each run: the numbered files of an earlier run with the same name are not deleted, only replaced one by
   one as the new run reaches them.
+
+**Closing, and drives that stop responding**
+
 - Turning **Record log** off, closing the app or the end of a `drivemon` run waits while a slow drive still
-  takes the rest of the log, for up to 30 seconds. When the drive takes nothing for 5 seconds, the rest is
-  counted as dropped.
+  takes the rest of the log, for up to 30 seconds. `drivemon` prints `Finishing the CSV log...` when that
+  takes more than a second, and Ctrl+C does not cut it short. The app's window stays open with the banner
+  *Saving the activity log… DriveMonitor closes when it is done.*, with Start/Stop, Record log and the three
+  Export commands greyed out, and closes by itself.
+- When the drive takes nothing for 5 seconds, DriveMonitor gives up within 1 more second and counts the rest
+  as dropped. `drivemon` then reports the log as failed and exits with code 1:
+
+  ```text
+  The CSV log stopped: The drive stopped accepting the activity log; events not yet written were dropped. 1,234 rows were written to E:\logs\activity.csv and 56 were dropped.
+  ```
+
+  If the drive is still stuck by then, the rows DriveMonitor was writing are not in the dropped count.
+- When Windows logs off or shuts down, the app saves its settings, then waits at most 3 seconds in all while
+  it stops monitoring and saves the log, so the last events can be missing from it.
+- After an error that ends the app, it stops monitoring and the log before it shows its message. With a log
+  on a slow drive, the window can stop responding for up to about 40 seconds first.
+
+**Links**
+
+DriveMonitor writes the log as administrator, so it refuses links, as the app does for its settings. When the
+log's folder is a junction or a symbolic link, or one of the log's file names is taken by a link, a folder or
+a file with more than one name (a hard link), the log does not start, or it stops when it reaches that file.
+For **Record log**, `%LOCALAPPDATA%\DriveMonitor`, the folder above `Logs`, is checked too: a junction, a
+symbolic link or a mount point at either of them keeps the log from starting. The message names the path,
+for example in the app and in `drivemon`:
+
+```text
+Could not start the activity log: 'C:\Users\<name>\AppData\Local\DriveMonitor' is a junction, symbolic link or other reparse point; it is not followed.
+Cannot write the CSV file: 'E:\logs\activity.csv' has other names (hard links); it is not used.
+```
+
+Replace the link with a plain folder or file, or give `drivemon` another path. For **Record log**, remove the
+junction or link at `%LOCALAPPDATA%\DriveMonitor` or `Logs`, for example with `rmdir` in a command prompt,
+which removes only the link and not the folder it points to; the app creates a plain folder again when it
+needs one (see [Where logs and settings live](#where-logs-and-settings-live)). `drivemon --csv` does not
+check the folders above the folder of its file: a junction there is followed, not refused. While a log runs,
+its folder cannot be renamed or deleted. An old file of the log whose name a link has taken over is not
+deleted, so the folder can then hold more than 10 files of the log.
 
 ## The self-test's folder
 
@@ -323,11 +392,18 @@ opens its `Logs` subfolder.
   defaults are used, and the file is rewritten when DriveMonitor exits. A saved window size or position that
   no screen can have is dropped. If a saved value still keeps the app from starting, the app moves
   `settings.json` to `settings.bad.json`, says so, and starts with the defaults the next time.
-- **Settings are not saved, or nothing is written to `errors.log`:** the app runs as administrator but keeps
-  these files in your profile, so it refuses links when it writes them. It does not write them when
-  `%LOCALAPPDATA%\DriveMonitor`, `settings.json`, `settings.json.tmp` or `errors.log` is a junction, a
-  symbolic link or a file with more than one name (a hard link). Replace the link with a plain folder or
-  file.
+- **Settings are not read or not saved, nothing is written to `errors.log`, Record log does not start, or
+  Open logs folder fails:** the app runs as administrator but keeps these files in your profile, so it
+  follows no link below `%LOCALAPPDATA%`. It refuses `%LOCALAPPDATA%\DriveMonitor` and its `Logs` folder when
+  they are a junction, a symbolic link or a mount point, and `settings.json`, `settings.json.tmp`,
+  `settings.bad.json` and `errors.log` when they are a link or a file with more than one name (a hard link).
+  When it cannot read the settings, it starts with the defaults; Record log and Open logs folder show *Could
+  not start the activity log: ...* and *Could not open the logs folder: ...* with the path of the link. Close
+  DriveMonitor and remove the junction or link in a command prompt, with `rmdir` for a folder or `del` for a
+  file; both remove only the link, not what it points to. The
+  app creates a plain folder again when it next writes there. To keep your settings, create
+  `%LOCALAPPDATA%\DriveMonitor` yourself first and copy `settings.json` into it from the folder the junction
+  pointed to. A link at `%LOCALAPPDATA%` itself, or above it, is followed.
 - **Live activity row limit:** `"MaxRows"` in `settings.json` (default 20,000, allowed 1,000 to 1,000,000).
   Edit it only while DriveMonitor is closed, because it rewrites the file when it exits.
 - **The self-test** works in a folder of its own at the root of the drive it tests; see
