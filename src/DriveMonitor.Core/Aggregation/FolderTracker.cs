@@ -14,8 +14,10 @@ namespace DriveMonitor.Core.Aggregation;
 /// (<see cref="ActivityAggregator.FolderEvidence"/>), so the published flag and the Files table agree: a path is
 /// a folder once something opens or creates it with FILE_DIRECTORY_FILE or lists it, and stops being one once
 /// something creates it as a file, opens it with FILE_NON_DIRECTORY_FILE, or reads, writes or resizes it.
-/// Failed operations teach nothing, as the aggregator does not record them. A delete or rename that did not fail
-/// forgets its path; a rename whose new path Windows reported gives the new path the type of the old one.
+/// Failed operations teach nothing, as the aggregator does not record them. A delete or rename that succeeded
+/// forgets its path, while one whose outcome is unknown (its completion was not seen) leaves it known: FAT rejects
+/// the newer form of both requests and Windows retries with the older one, which must still find the folder. A
+/// rename whose new path Windows reported, and that did not fail, gives the new path the type of the old one.
 /// </para>
 /// <para>
 /// Paths below a deleted or renamed folder are left as they are. Windows deletes only an empty folder, so
@@ -92,10 +94,13 @@ internal sealed class FolderTracker
         {
             folder = ev.IsDirectory || (_folders.Count > 0 && _folders.Contains(ev.Path));
 
-            // A failed delete or rename leaves the path as it was. Unknown counts as done, as in the statistics.
+            // A failed delete or rename leaves the path as it was, and so may one whose outcome is unknown: on FAT
+            // the first form of either request fails and Windows sends the older form next, which must still find
+            // the folder. Only a confirmed success moves the path away.
             if (ev.Status != IoStatus.Failed)
             {
-                _folders.Remove(ev.Path);
+                if (ev.Status == IoStatus.Success)
+                    _folders.Remove(ev.Path);
                 if (ev.Operation == FileOperation.Rename && ev.TargetPath is { } target)
                 {
                     if (folder)

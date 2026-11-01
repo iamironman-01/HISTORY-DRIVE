@@ -257,17 +257,53 @@ public sealed class MonitorEngineFolderTests
         Assert.False(Delete(engine, Folder).IsDirectory);
     }
 
-    [Fact]
-    public void WithoutCompletionEvents_AnUnknownOutcomeCountsAsDone()
+    [Theory]
+    [InlineData(FileOperation.Delete)]
+    [InlineData(FileOperation.Rename)]
+    public void FolderDeleteOrRenameRetriedOnFat_WithoutCompletionEvents_IsAFolderBothTimes(FileOperation change)
     {
+        // FAT rejects the newer form of a delete or rename and Windows retries with the older one. Without
+        // completion events neither outcome is known, so the first attempt must not make the engine forget the folder.
         using MonitorEngine engine = CreateEngine(new MonitorOptions { UseCompletionEvents = false });
         OpenFolder(engine, Folder);
 
-        FileActivityEvent deleted = Delete(engine, Folder);
+        FileActivityEvent[] attempts = change == FileOperation.Delete
+            ? [Delete(engine, Folder), Delete(engine, Folder, infoClass: FileIoClassifier.FileDispositionInformation)]
+            : [Rename(engine, Folder, target: null), Rename(engine, Folder, target: null, infoClass: FileIoClassifier.FileRenameInformation)];
 
-        Assert.Equal(IoStatus.Unknown, deleted.Status);
-        Assert.True(deleted.IsDirectory);
-        Assert.Equal(0, engine.Folders.Count);
+        foreach (FileActivityEvent attempt in attempts)
+        {
+            Assert.Equal(IoStatus.Unknown, attempt.Status);
+            Assert.True(attempt.IsDirectory);
+        }
+
+        Assert.True(engine.Folders.IsFolder(Folder));
+    }
+
+    [Theory]
+    [InlineData(FileOperation.Delete)]
+    [InlineData(FileOperation.Rename)]
+    public void FolderDeleteOrRenameRetriedOnFat_AfterAnAttemptOfUnknownOutcome_IsAFolderUntilOneSucceeds(FileOperation change)
+    {
+        using MonitorEngine engine = CreateEngine();
+        List(engine, Folder);
+
+        // The attempt FAT rejects, published as Unknown because its completion is not seen (here it has no request
+        // address to match one to); Windows reported its new path all the same.
+        PendingIo rejected = change == FileOperation.Delete ? DeleteIo(Folder) : RenameIo(Folder);
+        rejected.Irp = 0;
+        if (change == FileOperation.Rename)
+            rejected.TargetPath = NewName;
+        FileActivityEvent first = Run(engine, rejected);
+        FileActivityEvent retried = change == FileOperation.Delete
+            ? Delete(engine, Folder, infoClass: FileIoClassifier.FileDispositionInformation)
+            : Rename(engine, Folder, NewName, infoClass: FileIoClassifier.FileRenameInformation);
+
+        Assert.Equal((IoStatus.Unknown, FileEventFlags.Directory), (first.Status, first.Flags));
+        Assert.Equal((IoStatus.Success, FileEventFlags.Directory), (retried.Status, retried.Flags));
+        Assert.False(engine.Folders.IsFolder(Folder)); // gone once a success is confirmed
+        Assert.Equal(change == FileOperation.Rename, engine.Folders.IsFolder(NewName));
+        Assert.True(FileStats(engine, Folder).IsDirectory); // the statistics agree
     }
 
     [Fact]
@@ -355,14 +391,13 @@ public sealed class MonitorEngineFolderTests
         return Run(engine, io);
     }
 
-    private FileActivityEvent Delete(MonitorEngine engine, string path, int status = 0) => Run(engine, DeleteIo(path), status: status);
+    private FileActivityEvent Delete(
+        MonitorEngine engine, string path, int status = 0, int infoClass = FileIoClassifier.FileDispositionInformationEx) =>
+        Run(engine, DeleteIo(path, infoClass), status: status);
 
-    private FileActivityEvent Rename(MonitorEngine engine, string path, string? target, int status = 0)
-    {
-        PendingIo io = Io(RawFileOp.Rename, path);
-        io.InfoClass = FileIoClassifier.FileRenameInformationEx;
-        return Run(engine, io, status: status, target: target);
-    }
+    private FileActivityEvent Rename(
+        MonitorEngine engine, string path, string? target, int status = 0, int infoClass = FileIoClassifier.FileRenameInformationEx) =>
+        Run(engine, RenameIo(path, infoClass), status: status, target: target);
 
     private PendingIo FolderOpenIo(string path)
     {
@@ -372,12 +407,22 @@ public sealed class MonitorEngineFolderTests
         return io;
     }
 
-    /// <summary>The disposition that RemoveDirectoryW and DeleteFileW send.</summary>
-    private PendingIo DeleteIo(string path)
+    /// <summary>
+    /// The disposition that RemoveDirectoryW and DeleteFileW send: the Ex form, or on FAT, which rejects it, the
+    /// classic form next (its DeleteFile = TRUE has the same value as the Ex delete flag).
+    /// </summary>
+    private PendingIo DeleteIo(string path, int infoClass = FileIoClassifier.FileDispositionInformationEx)
     {
         PendingIo io = Io(RawFileOp.Delete, path);
-        io.InfoClass = FileIoClassifier.FileDispositionInformationEx;
+        io.InfoClass = infoClass;
         io.ExtraInfo = FileIoClassifier.FileDispositionDelete;
+        return io;
+    }
+
+    private PendingIo RenameIo(string path, int infoClass = FileIoClassifier.FileRenameInformationEx)
+    {
+        PendingIo io = Io(RawFileOp.Rename, path);
+        io.InfoClass = infoClass;
         return io;
     }
 
