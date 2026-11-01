@@ -66,6 +66,23 @@ internal static class FileLinks
         }
     }
 
+    /// <summary>
+    /// False when Windows refuses, as for <see cref="TryCreateFileSymbolicLink"/>. A recursive delete removes the
+    /// link itself, without administrator rights and without following it.
+    /// </summary>
+    public static bool TryCreateDirectorySymbolicLink(string link, string targetFolder)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(link, targetFolder);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateHardLinkW(string fileName, string existingFileName, IntPtr securityAttributes);
