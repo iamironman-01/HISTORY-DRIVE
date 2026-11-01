@@ -67,8 +67,9 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
       not checked.
   - `CsvActivityLog` takes these limits in its constructor (`filePath, maxFileBytes, maxFiles, minFreeBytes,
     capacity`) and gains `CurrentFilePath`, the file being written, and `IsLogFile`, with which the engine
-    leaves every file of its own log out of the events. Rows are written in chunks of about 64 KB, and
-    `Written` counts only rows whose write completed.
+    leaves every file of its own log out of the events. Rows are collected into chunks of up to about 64 KB,
+    and each chunk is written once it is full or no more events are waiting; `Written` counts only rows whose
+    write completed.
 - **CLI** (`drivemon`)
   - Without `--drives`, `drivemon` also monitors drives plugged in after it started. Every 200 ms it checks
     whether a drive letter came or went, and every 10 seconds it reads the drive list anyway; each new drive
