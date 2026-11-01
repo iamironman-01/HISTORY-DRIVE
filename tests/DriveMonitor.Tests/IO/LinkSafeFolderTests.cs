@@ -498,6 +498,37 @@ public sealed class LinkSafeFolderTests
     }
 
     [Fact]
+    public void OpenBelow_AFolderMadeAJunctionWhileHeld_GetsNothingCreatedThroughIt()
+    {
+        // A held folder cannot be renamed, deleted or replaced, but while it is still empty another program can make
+        // it a junction itself (FSCTL_SET_REPARSE_POINT through a handle that shares the holder's access). A name
+        // opened relative to the held handle then fails instead of being looked up through the junction; the walk
+        // opens each folder's child the same way.
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        string app = Path.Combine(root, "DriveMonitor");
+        IDisposable? planted = null;
+        try
+        {
+            using (LinkSafeFolder folder = LinkSafeFolder.OpenBelow(root, app, create: true))
+            {
+                planted = FileLinks.CreateJunction(app, victim);
+                Assert.True(File.GetAttributes(app).HasFlag(FileAttributes.ReparsePoint));
+
+                Assert.ThrowsAny<IOException>(() => folder.OpenFile("errors.log", FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read).Dispose());
+            }
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+        }
+        finally
+        {
+            // Only once the folder is closed: the junction cannot be removed while it is held.
+            planted?.Dispose();
+        }
+    }
+
+    [Fact]
     public void OpenBelow_RefusesASymbolicLinkOnAFolderOnTheWay()
     {
         using var temp = new TempDirectory();
