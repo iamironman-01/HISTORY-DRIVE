@@ -331,16 +331,22 @@ away.
 DriveMonitor writes the log as administrator, so it refuses links, as the app does for its settings. When the
 log's folder is a junction or a symbolic link, or one of the log's file names is taken by a link, a folder or
 a file with more than one name (a hard link), the log does not start, or it stops when it reaches that file.
-The message names the path, for example:
+For **Record log**, `%LOCALAPPDATA%\DriveMonitor`, the folder above `Logs`, is checked too: a junction, a
+symbolic link or a mount point at either of them keeps the log from starting. The message names the path,
+for example in the app and in `drivemon`:
 
 ```text
+Could not start the activity log: 'C:\Users\<name>\AppData\Local\DriveMonitor' is a junction, symbolic link or other reparse point; it is not followed.
 Cannot write the CSV file: 'E:\logs\activity.csv' has other names (hard links); it is not used.
 ```
 
-Replace the link with a plain folder or file, or choose another path. A junction on a folder above the log's
-folder is followed, not refused. While a log runs, its folder cannot be renamed or deleted. An old file of the
-log whose name a link has taken over is not deleted, so the folder can then hold more than 10 files of the
-log.
+Replace the link with a plain folder or file, or give `drivemon` another path. For **Record log**, remove the
+junction or link at `%LOCALAPPDATA%\DriveMonitor` or `Logs`: deleting a junction leaves the folder it points
+to alone, and the app creates a plain folder again when it needs one (see
+[Where logs and settings live](#where-logs-and-settings-live)). `drivemon --csv` does not check the folders
+above the folder of its file: a junction there is followed, not refused. While a log runs, its folder cannot
+be renamed or deleted. An old file of the log whose name a link has taken over is not deleted, so the folder
+can then hold more than 10 files of the log.
 
 ## The self-test's folder
 
@@ -386,11 +392,17 @@ opens its `Logs` subfolder.
   defaults are used, and the file is rewritten when DriveMonitor exits. A saved window size or position that
   no screen can have is dropped. If a saved value still keeps the app from starting, the app moves
   `settings.json` to `settings.bad.json`, says so, and starts with the defaults the next time.
-- **Settings are not saved, or nothing is written to `errors.log`:** the app runs as administrator but keeps
-  these files in your profile, so it refuses links when it writes them. It does not write them when
-  `%LOCALAPPDATA%\DriveMonitor`, `settings.json`, `settings.json.tmp` or `errors.log` is a junction, a
-  symbolic link or a file with more than one name (a hard link). Replace the link with a plain folder or
-  file.
+- **Settings are not read or not saved, nothing is written to `errors.log`, Record log does not start, or
+  Open logs folder fails:** the app runs as administrator but keeps these files in your profile, so it
+  follows no link below `%LOCALAPPDATA%`. It refuses `%LOCALAPPDATA%\DriveMonitor` and its `Logs` folder when
+  they are a junction, a symbolic link or a mount point, and `settings.json`, `settings.json.tmp`,
+  `settings.bad.json` and `errors.log` when they are a link or a file with more than one name (a hard link).
+  When it cannot read the settings, it starts with the defaults; Record log and Open logs folder show *Could
+  not start the activity log: ...* and *Could not open the logs folder: ...* with the path of the link. Close
+  DriveMonitor and remove the junction or link; deleting a junction leaves the folder it points to alone. The
+  app creates a plain folder again when it next writes there. To keep your settings, create
+  `%LOCALAPPDATA%\DriveMonitor` yourself first and copy `settings.json` into it from the folder the junction
+  pointed to. A link at `%LOCALAPPDATA%` itself, or above it, is followed.
 - **Live activity row limit:** `"MaxRows"` in `settings.json` (default 20,000, allowed 1,000 to 1,000,000).
   Edit it only while DriveMonitor is closed, because it rewrites the file when it exits.
 - **The self-test** works in a folder of its own at the root of the drive it tests; see
