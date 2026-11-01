@@ -1,5 +1,6 @@
 using System.Globalization;
 using DriveMonitor.App.Services;
+using DriveMonitor.Core.IO;
 using DriveMonitor.Tests.TestSupport;
 
 namespace DriveMonitor.Tests.App;
@@ -59,6 +60,15 @@ public sealed class SettingsStoreTests
         Assert.False(File.Exists(store.FilePath));
         Assert.Equal("""{ "MaxRows": 5000 }""", File.ReadAllText(moved!));
         Assert.Equal(AppSettings.DefaultMaxRows, store.Load().MaxRows);
+    }
+
+    [Fact]
+    public void TheAppsFolders_AreBelowTheTrustedRoot()
+    {
+        // Record log, Open logs folder, the settings and the error log open their folders below this root.
+        Assert.Equal(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), SettingsStore.TrustedRoot);
+        Assert.True(LinkSafeFolder.IsBelow(SettingsStore.TrustedRoot, SettingsStore.AppDataDirectory));
+        Assert.True(LinkSafeFolder.IsBelow(SettingsStore.TrustedRoot, Path.Combine(SettingsStore.LogsDirectory, "activity-20261101-120000.csv")));
     }
 
     [Fact]

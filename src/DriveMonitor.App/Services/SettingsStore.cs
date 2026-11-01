@@ -127,9 +127,15 @@ public sealed class SettingsStore
         FilePath = filePath ?? Path.Combine(AppDataDirectory, "settings.json");
     }
 
+    /// <summary>
+    /// <c>%LOCALAPPDATA%</c>, which holds every file the app writes. The elevated app trusts its path, which an
+    /// administrator may have redirected, but follows no link below it (<see cref="LinkSafeFolder.OpenBelow"/>):
+    /// the user's own programs can put one there.
+    /// </summary>
+    public static string TrustedRoot { get; } = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
     /// <summary><c>%LOCALAPPDATA%\DriveMonitor</c>.</summary>
-    public static string AppDataDirectory { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveMonitor");
+    public static string AppDataDirectory { get; } = Path.Combine(TrustedRoot, "DriveMonitor");
 
     /// <summary>Where "Record log" writes its CSV files.</summary>
     public static string LogsDirectory { get; } = Path.Combine(AppDataDirectory, "Logs");

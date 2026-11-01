@@ -201,7 +201,7 @@ public sealed partial class MainViewModel
                 string path = Path.Combine(
                     SettingsStore.LogsDirectory,
                     $"activity-{DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)}.csv");
-                await Task.Run(() => _engine.StartLog(path));
+                await Task.Run(() => _engine.StartLog(path, SettingsStore.TrustedRoot));
                 _logErrorReported = false;
                 ShowBanner(BannerKeys.Log, BannerKind.Info, "Recording every event to " + path,
                     "Open logs folder", OpenLogsFolder, autoClose: TimeSpan.FromSeconds(10));
@@ -264,7 +264,7 @@ public sealed partial class MainViewModel
     {
         try
         {
-            await Task.Run(() => ShellActions.OpenFolder(SettingsStore.LogsDirectory));
+            await Task.Run(() => ShellActions.OpenFolder(SettingsStore.LogsDirectory, SettingsStore.TrustedRoot));
         }
         catch (Exception ex)
         {
