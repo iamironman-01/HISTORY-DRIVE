@@ -85,6 +85,9 @@ public sealed class CsvActivityLog : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(maxFiles);
         ArgumentOutOfRangeException.ThrowIfNegative(minFreeBytes);
 
+        // Here, not when the channel is made: by then the file is emptied and the folder and file are open.
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
+
         FilePath = Path.GetFullPath(filePath);
         string? folderPath = Path.GetDirectoryName(FilePath);
         if (folderPath is null || Path.GetFileName(FilePath).Length == 0)

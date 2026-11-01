@@ -433,6 +433,21 @@ public sealed class CsvActivityLogTests
         Assert.Contains("is a folder", error.Message);
     }
 
+    [Fact]
+    public void Constructor_InvalidCapacity_ThrowsBeforeTouchingTheFileOrTheFolder()
+    {
+        using var temp = new TempDirectory();
+        string logs = Directory.CreateDirectory(temp.PathOf("Logs")).FullName;
+        string path = Path.Combine(logs, "log.csv");
+        File.WriteAllText(path, "an earlier log, which must survive\r\n");
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CsvActivityLog(path, capacity: 0));
+
+        // Nothing may be left open by a constructor that failed: neither the folder nor the file.
+        Assert.True(CanOpenForDelete(logs), "the folder is still held");
+        Assert.Equal("an earlier log, which must survive\r\n", Encoding.UTF8.GetString(ReadShared(path)));
+    }
+
     /// <summary>Whether another program could rename or delete the folder now, which takes an open with delete access.</summary>
     private static bool CanOpenForDelete(string folder)
     {
