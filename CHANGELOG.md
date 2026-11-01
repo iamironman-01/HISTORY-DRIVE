@@ -217,12 +217,12 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
     logoff the window froze, Windows listed DriveMonitor as a program that prevents signing out, and the
     settings were saved last. Now the window stays open and responsive while that work runs on the thread
     pool: it shows *Saving the activity log… DriveMonitor closes when it is done.* while a log is saved, greys
-    out Start/Stop, Record log and Export, and closes by itself when the work is done; closing it again
-    meanwhile starts no second stop. A logoff or shutdown saves the settings first and waits at most 3 seconds
-    for the rest.
+    out Start/Stop, Record log and the three Export commands, and closes by itself when the work is done;
+    closing it again meanwhile starts no second stop. A logoff or shutdown saves the settings first and waits
+    at most 3 seconds for the rest.
   - When stopping the kernel session failed at exit, the activity log was not ended: its file stayed open and
-    the events it still held were lost. The failure is now written to `errors.log`, and the engine is still
-    disposed, which stops the session again and ends the log.
+    the events it still held were lost. The failure is still written to `errors.log`, and the engine is now
+    disposed anyway, which stops the session again and ends the log.
 
 ### Security
 
@@ -271,8 +271,8 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
     and error messages that quote a path were printed as they were, so a program could overwrite or fake
     `drivemon`'s lines with control characters and escape sequences. Control and bidirectional formatting
     characters are now printed as `?` in event lines, the summary, `--list`, the `Now monitoring` line, the
-    start warning, a start failure, the kernel session's fault and restart lines, the CSV log's lines and the
-    lines that say where the self-test's report was saved or why it was not.
+    start warning, the reason live monitoring could not start, the kernel session's fault and restart lines,
+    the CSV log's lines and the lines that say where the self-test's report was saved or why it was not.
 - **App** (`DriveMonitor.exe`)
   - The app runs elevated but writes `settings.json` and `errors.log` in `%LOCALAPPDATA%\DriveMonitor`,
     where every program of the user can plant links, and it followed them, so it could be made to overwrite
