@@ -112,9 +112,9 @@ the value `Local AppData` under
 redirection, then follows no link below it. Such a program can therefore choose the folder in which the app
 creates `DriveMonitor` as administrator, but not the names the app writes there, which are fixed:
 `DriveMonitor`, `Logs` and the `%LOCALAPPDATA%` files in the table above. The log empties an existing file
-only when it is a plain file with exactly the log's name, and deletes only files it created. For a `--csv`
-file, the folders above its own folder are followed, since you choose that path; only that folder and the
-file names are checked.
+only when it is a plain file with exactly the name of one of the log's files, and deletes only files it
+created. For a `--csv` file, the folders above its own folder are followed, since you choose that path; only
+that folder and the file names are checked.
 
 ## Supply chain
 
