@@ -84,6 +84,38 @@ public sealed class MonitorEngineSinkTests
     }
 
     [Fact]
+    public void StartLog_AfterDispose_ThrowsAndCreatesNoFile()
+    {
+        using var temp = new TempDirectory();
+        string path = temp.PathOf("activity.csv");
+        var engine = new MonitorEngine(new MonitorOptions { MinLogFreeSpaceMB = 0 });
+
+        engine.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => engine.StartLog(path));
+        Assert.Null(engine.Log);
+        Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public void StartLog_WhileTheEngineIsDisposed_ClosesTheNewLogAndThrows()
+    {
+        using var temp = new TempDirectory();
+        string path = temp.PathOf("activity.csv");
+        var engine = new MonitorEngine(new MonitorOptions { MinLogFreeSpaceMB = 0 });
+
+        // Dispose, and with it its StopLog, runs after the log is created but before the engine holds it.
+        engine.LogCreated = engine.Dispose;
+
+        Assert.Throws<ObjectDisposedException>(() => engine.StartLog(path));
+        Assert.Null(engine.Log);
+        using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            // Opened without sharing: the log has closed the file.
+        }
+    }
+
+    [Fact]
     public void TryAccept_PathOnAMonitoredDrive_ReturnsTheDrive()
     {
         using MonitorEngine engine = CreateEngine();

@@ -173,6 +173,9 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     /// <summary>Diagnostics: sees each raw operation (with its completion) just before it is classified. Must be fast.</summary>
     internal Action<PendingIo>? RawOperationObserver { get; set; }
 
+    /// <summary>Runs in <see cref="StartLog"/> after the new log is created, before the engine holds it; tests dispose here.</summary>
+    internal Action? LogCreated { get; set; }
+
     /// <summary>
     /// The paths known to be folders, which give a folder's delete or rename the Directory flag before the
     /// event is published. Forgotten with the statistics, which remember folders the same way.
@@ -277,8 +280,14 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     /// The file cannot be created, it or a folder on its way is a link that is not followed, or its drive is
     /// already short of free space.
     /// </exception>
+    /// <exception cref="ObjectDisposedException">
+    /// The engine is disposed, also when <see cref="Dispose"/> ran while the log was being created; that log is then
+    /// closed again.
+    /// </exception>
     public void StartLog(string filePath, string? trustedRoot = null)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed), this);
+
         const long MB = 1024 * 1024;
         var log = new CsvActivityLog(
             filePath,
@@ -286,7 +295,16 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
             maxFiles: Options.MaxLogFiles,
             minFreeBytes: Options.MinLogFreeSpaceMB * MB,
             trustedRoot: trustedRoot);
+        LogCreated?.Invoke();
         Interlocked.Exchange(ref _log, log)?.Dispose();
+
+        // Dispose sets _disposed before its own StopLog, and both swap _log atomically. So either that StopLog took
+        // this log, or this check sees _disposed: a log created while the engine was being disposed never stays open.
+        if (Volatile.Read(ref _disposed))
+        {
+            StopLog();
+            ObjectDisposedException.ThrowIf(true, this);
+        }
     }
 
     public void StopLog() => Interlocked.Exchange(ref _log, null)?.Dispose();
