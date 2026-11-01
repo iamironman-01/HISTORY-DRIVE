@@ -536,11 +536,11 @@ internal static class SelfTest
         try
         {
             File.WriteAllText(options.ReportPath, report.ToString(), Encoding.UTF8);
-            Console.WriteLine($"Report saved to {options.ReportPath}");
+            Console.WriteLine($"Report saved to {ConsoleText.Clean(options.ReportPath)}");
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Could not save the report: {ex.Message}");
+            Console.Error.WriteLine($"Could not save the report: {ConsoleText.Clean(ex.Message)}");
         }
     }
 }
