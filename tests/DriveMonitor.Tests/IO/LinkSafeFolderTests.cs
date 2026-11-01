@@ -220,4 +220,180 @@ public sealed class LinkSafeFolderTests
         Assert.Throws<IOException>(() => folder.Rename(temporary, "settings.json"));
         Assert.Equal("keep me", File.ReadAllText(victim));
     }
+
+    [Fact]
+    public void Open_TakesAFolderPathLongerThanMaxPath()
+    {
+        using var temp = new TempDirectory();
+        string path = temp.FullPath;
+        while (path.Length <= 300)
+            path = Path.Combine(path, "a folder with a long name");
+        Directory.CreateDirectory(path);
+
+        using (LinkSafeFolder folder = LinkSafeFolder.Open(path))
+        {
+            Assert.Equal(path, folder.FullPath);
+            using FileStream log = folder.OpenFile("errors.log", FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            log.Write("long"u8);
+        }
+
+        Assert.Equal("long", File.ReadAllText(Path.Combine(path, "errors.log")));
+    }
+
+    [Fact]
+    public async Task OpenFile_Asynchronous_GivesAnAsynchronousStream()
+    {
+        using var temp = new TempDirectory();
+        using LinkSafeFolder folder = LinkSafeFolder.Open(temp.FullPath);
+
+        using (FileStream log = folder.OpenFile("activity.csv", FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, options: FileOptions.Asynchronous))
+        {
+            Assert.True(log.IsAsync);
+            await log.WriteAsync("one "u8.ToArray());
+            await log.WriteAsync("two"u8.ToArray());
+        }
+
+        Assert.Equal("one two", File.ReadAllText(temp.PathOf("activity.csv")));
+    }
+
+    [Theory]
+    [InlineData(FileOptions.WriteThrough)]
+    [InlineData(FileOptions.DeleteOnClose)]
+    [InlineData(FileOptions.Asynchronous | FileOptions.SequentialScan)]
+    public void OpenFile_RejectsOptionsOtherThanAsynchronous(FileOptions options)
+    {
+        using var temp = new TempDirectory();
+        using LinkSafeFolder folder = LinkSafeFolder.Open(temp.FullPath);
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => folder.OpenFile("activity.csv", FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, options: options));
+        Assert.False(File.Exists(temp.PathOf("activity.csv")));
+    }
+
+    [Fact]
+    public void DeleteFile_DeletesAPlainFile()
+    {
+        using var temp = new TempDirectory();
+        File.WriteAllText(temp.PathOf("activity.csv"), "an old part");
+        using LinkSafeFolder folder = LinkSafeFolder.Open(temp.FullPath);
+
+        Assert.True(folder.DeleteFile("activity.csv"));
+        Assert.False(File.Exists(temp.PathOf("activity.csv")));
+    }
+
+    [Fact]
+    public void DeleteFile_ReturnsFalseWhenNothingHasTheName()
+    {
+        using var temp = new TempDirectory();
+        using LinkSafeFolder folder = LinkSafeFolder.Open(temp.FullPath);
+
+        Assert.False(folder.DeleteFile("activity.csv"));
+    }
+
+    [Fact]
+    public void DeleteFile_TakesTheNameAwayAtOnce_EvenWhileAnotherProgramHasTheFileOpen()
+    {
+        using var temp = new TempDirectory();
+        File.WriteAllText(temp.PathOf("activity.csv"), "an old part");
+        using LinkSafeFolder folder = LinkSafeFolder.Open(temp.FullPath);
+        using var viewer = new FileStream(temp.PathOf("activity.csv"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+
+        Assert.True(folder.DeleteFile("activity.csv"));
+
+        // As DeleteFile does on NTFS: the name does not wait for the viewer to close the file.
+        Assert.Empty(Directory.EnumerateFileSystemEntries(temp.FullPath));
+    }
+
+    [Fact]
+    public void DeleteFile_FileOpenWithoutDeleteSharing_ThrowsAndKeepsIt()
+    {
+        using var temp = new TempDirectory();
+        File.WriteAllText(temp.PathOf("activity.csv"), "an old part");
+        using LinkSafeFolder folder = LinkSafeFolder.Open(temp.FullPath);
+
+        using (new FileStream(temp.PathOf("activity.csv"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Throws<IOException>(() => folder.DeleteFile("activity.csv"));
+
+        Assert.True(File.Exists(temp.PathOf("activity.csv")));
+    }
+
+    [Fact]
+    public void DeleteFile_ReadOnlyFile_ThrowsAndKeepsIt()
+    {
+        using var temp = new TempDirectory();
+        string path = temp.PathOf("activity.csv");
+        File.WriteAllText(path, "an old part");
+        File.SetAttributes(path, FileAttributes.ReadOnly);
+        using LinkSafeFolder folder = LinkSafeFolder.Open(temp.FullPath);
+        try
+        {
+            Assert.Throws<UnauthorizedAccessException>(() => folder.DeleteFile("activity.csv"));
+            Assert.True(File.Exists(path));
+        }
+        finally
+        {
+            File.SetAttributes(path, FileAttributes.Normal);
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(".")]
+    [InlineData("..")]
+    [InlineData(@"sub\activity.csv")]
+    [InlineData(@"..\activity.csv")]
+    [InlineData("activity.csv:stream")]
+    public void DeleteFile_AcceptsOnlyAFileName(string name)
+    {
+        using var temp = new TempDirectory();
+        using LinkSafeFolder folder = LinkSafeFolder.Open(temp.FullPath);
+
+        Assert.Throws<ArgumentException>(() => folder.DeleteFile(name));
+    }
+
+    [Fact]
+    public void DeleteFile_RefusesAJunction()
+    {
+        using var temp = new TempDirectory();
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        File.WriteAllText(Path.Combine(victim, "keep.txt"), "keep me");
+        string app = Directory.CreateDirectory(temp.PathOf("DriveMonitor")).FullName;
+        using IDisposable planted = FileLinks.CreateJunction(Path.Combine(app, "activity.csv"), victim);
+        using LinkSafeFolder folder = LinkSafeFolder.Open(app);
+
+        Assert.Throws<IOException>(() => folder.DeleteFile("activity.csv"));
+        Assert.True(Directory.Exists(Path.Combine(app, "activity.csv")));
+        Assert.Equal("keep me", File.ReadAllText(Path.Combine(victim, "keep.txt")));
+    }
+
+    [Fact]
+    public void DeleteFile_RefusesAHardLinkToAnotherFile()
+    {
+        using var temp = new TempDirectory();
+        string victim = temp.PathOf("victim.txt");
+        File.WriteAllText(victim, "keep me");
+        string app = Directory.CreateDirectory(temp.PathOf("DriveMonitor")).FullName;
+        FileLinks.CreateHardLink(Path.Combine(app, "activity.csv"), victim);
+        using LinkSafeFolder folder = LinkSafeFolder.Open(app);
+
+        Assert.Throws<IOException>(() => folder.DeleteFile("activity.csv"));
+        Assert.True(File.Exists(Path.Combine(app, "activity.csv")));
+        Assert.Equal("keep me", File.ReadAllText(victim));
+    }
+
+    [Fact]
+    public void DeleteFile_RefusesASymbolicLinkToAnotherFile()
+    {
+        using var temp = new TempDirectory();
+        string victim = temp.PathOf("victim.txt");
+        File.WriteAllText(victim, "keep me");
+        string app = Directory.CreateDirectory(temp.PathOf("DriveMonitor")).FullName;
+        if (!FileLinks.TryCreateFileSymbolicLink(Path.Combine(app, "activity.csv"), victim))
+            return; // Windows refuses symbolic links without administrator rights or Developer Mode; CI runs elevated.
+        using LinkSafeFolder folder = LinkSafeFolder.Open(app);
+
+        Assert.Throws<IOException>(() => folder.DeleteFile("activity.csv"));
+        Assert.True(File.Exists(Path.Combine(app, "activity.csv")));
+        Assert.Equal("keep me", File.ReadAllText(victim));
+    }
 }
