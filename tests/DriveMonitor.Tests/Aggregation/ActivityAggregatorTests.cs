@@ -556,6 +556,62 @@ public sealed class ActivityAggregatorTests
         Assert.False(FileStats(aggregator, @"E:\f1").IsDirectory);
     }
 
+    [Theory]
+    [InlineData(false)] // the aggregator saw the folder listed itself
+    [InlineData(true)] // only MonitorEngine knew it, and flagged the rename
+    public void RenamedFolder_IsAFolderAtItsNewPath(bool flaggedByTheEngine)
+    {
+        const string pictures = @"E:\pictures";
+        var aggregator = new ActivityAggregator();
+        if (!flaggedByTheEngine)
+            aggregator.Record(Ev(FileOperation.List, Folder, flags: FileEventFlags.Directory));
+
+        FileEventFlags flags = flaggedByTheEngine ? FileEventFlags.Directory : FileEventFlags.None;
+        aggregator.Record(Ev(FileOperation.Rename, Folder, flags: flags, target: pictures, second: 1));
+        aggregator.Record(Ev(FileOperation.SetInfo, pictures, second: 2)); // timestamps: no row for a known folder
+        Assert.Equal(1, aggregator.TrackedFiles);
+
+        aggregator.Record(Ev(FileOperation.Delete, pictures, second: 3)); // events can come here without the flag
+
+        FileStatsSnapshot deleted = FileStats(aggregator, pictures);
+        Assert.True(deleted.IsDirectory);
+        Assert.Equal(FileLifecycle.Deleted, deleted.Lifecycle);
+        Assert.True(FileStats(aggregator, Folder).IsDirectory);
+    }
+
+    [Fact]
+    public void FileRenamedToARememberedFolderPath_IsAFileThere()
+    {
+        var aggregator = new ActivityAggregator();
+        aggregator.Record(Ev(FileOperation.List, Folder, flags: FileEventFlags.Directory)); // the folder later went away unseen
+
+        aggregator.Record(Ev(FileOperation.Rename, FileA, target: Folder, second: 1));
+        aggregator.Record(Ev(FileOperation.Delete, Folder, second: 2));
+
+        Assert.False(FileStats(aggregator, Folder).IsDirectory);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void RenameToAPathWithARow_GivesTheRowTheTypeOfWhatWasRenamed(bool folder)
+    {
+        const string archive = @"E:\archive";
+        var aggregator = new ActivityAggregator();
+
+        // The row of what used to be at the target, of the other type.
+        aggregator.Record(Ev(FileOperation.Create, archive, flags: folder ? FileEventFlags.None : FileEventFlags.Directory));
+        aggregator.Record(Ev(FileOperation.Delete, archive, second: 1));
+        Assert.Equal(!folder, FileStats(aggregator, archive).IsDirectory);
+        aggregator.TakeChangedFiles();
+
+        string source = folder ? Folder : FileA;
+        aggregator.Record(Ev(FileOperation.Rename, source, flags: folder ? FileEventFlags.Directory : FileEventFlags.None, target: archive, second: 2));
+
+        Assert.Equal(folder, FileStats(aggregator, archive).IsDirectory);
+        Assert.Contains(aggregator.TakeChangedFiles(), f => f.Path == archive); // the table hears of it
+    }
+
     [Fact]
     public void Clear_ForgetsRememberedFolders()
     {
