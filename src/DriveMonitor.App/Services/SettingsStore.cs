@@ -126,7 +126,7 @@ public sealed class SettingsStore
 
     /// <param name="filePath">The settings file; null for <c>%LOCALAPPDATA%\DriveMonitor\settings.json</c>.</param>
     /// <param name="trustedRoot">
-    /// A folder above the file below which no link is followed when the file is written or set aside;
+    /// A folder above the file below which no link is followed when the file is read, written or set aside;
     /// <see cref="TrustedRoot"/> for the default file. Without one only the file's own folder is checked.
     /// </param>
     public SettingsStore(string? filePath = null, string? trustedRoot = null)
@@ -150,19 +150,30 @@ public sealed class SettingsStore
 
     public string FilePath { get; }
 
-    /// <summary>The saved settings; defaults when the file is missing, unreadable or corrupt.</summary>
+    /// <summary>
+    /// The saved settings; defaults when the file is missing, unreadable or corrupt, or when it or a folder on its
+    /// way is a link, or it has other names (hard links).
+    /// </summary>
     public AppSettings Load()
     {
         try
         {
-            if (File.Exists(FilePath)
-                && JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), JsonOptions) is { } settings)
+            // Read through the folder, as TrySave writes: by path, the elevated app would follow a link that a
+            // program of the user planted on the way, to a file of that program's choosing or, through
+            // \RPC Control, to a pipe or a device.
+            string fullPath = Path.GetFullPath(FilePath);
+            using LinkSafeFolder folder = OpenFolder(Path.GetDirectoryName(fullPath)!, create: false);
+            using FileStream file = folder.OpenFile(Path.GetFileName(fullPath), FileMode.Open, FileAccess.Read, FileShare.Read);
+
+            // As File.ReadAllText reads: UTF-8 unless a byte order mark says otherwise.
+            using var reader = new StreamReader(file);
+            if (JsonSerializer.Deserialize<AppSettings>(reader.ReadToEnd(), JsonOptions) is { } settings)
             {
                 settings.Normalize();
                 return settings;
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or JsonException or NotSupportedException)
         {
             // Start with defaults; the file is rewritten on exit.
         }
@@ -205,13 +216,12 @@ public sealed class SettingsStore
     {
         try
         {
-            if (!File.Exists(FilePath))
-                return null;
             string fullPath = Path.GetFullPath(FilePath);
             string target = Path.ChangeExtension(FilePath, ".bad.json");
 
             // Renamed through the folder, as TrySave writes: a link on the way, at the file or at the new name is
-            // refused, so the elevated app cannot be made to move or replace another file.
+            // refused, so the elevated app cannot be made to move or replace another file. A missing folder or
+            // file fails to open, so nothing is looked up by path first.
             using LinkSafeFolder folder = OpenFolder(Path.GetDirectoryName(fullPath)!, create: false);
             using FileStream file = folder.OpenFile(
                 Path.GetFileName(fullPath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, allowRename: true);

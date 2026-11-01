@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using DriveMonitor.App.Services;
 using DriveMonitor.Core.IO;
 using DriveMonitor.Tests.TestSupport;
@@ -47,6 +48,55 @@ public sealed class SettingsStoreTests
         using var temp = new TempDirectory();
 
         Assert.NotNull(LoadWindow(temp, left: -1_000_000, top: 1_000_000, width: 100_000, height: 100_000).Window);
+    }
+
+    [Fact]
+    public void Load_ReadsAFileSavedAsUtf16()
+    {
+        // A hand-edited file may have been saved with another encoding; its byte order mark says which.
+        using var temp = new TempDirectory();
+        var store = new SettingsStore(temp.PathOf("settings.json"));
+        File.WriteAllText(store.FilePath, """{ "MaxRows": 5000 }""", Encoding.Unicode);
+
+        Assert.Equal(5000, store.Load().MaxRows);
+    }
+
+    [Fact]
+    public void Load_BelowATrustedRoot_ReadsThePlainFile()
+    {
+        using var temp = new TempDirectory();
+        string app = Directory.CreateDirectory(temp.PathOf("DriveMonitor")).FullName;
+        var store = new SettingsStore(Path.Combine(app, "settings.json"), trustedRoot: temp.FullPath);
+        File.WriteAllText(store.FilePath, """{ "MaxRows": 5000 }""");
+
+        Assert.Equal(5000, store.Load().MaxRows);
+    }
+
+    [Fact]
+    public void Load_BelowATrustedRoot_IgnoresAJunctionInPlaceOfTheFolder()
+    {
+        // Read by path, the elevated app followed it and started with whatever another program put behind it; through
+        // \RPC Control the name could even lead to a pipe or a device.
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string elsewhere = Directory.CreateDirectory(temp.PathOf("elsewhere")).FullName;
+        File.WriteAllText(Path.Combine(elsewhere, "settings.json"), """{ "MaxRows": 5000 }""");
+        string app = Path.Combine(root, "DriveMonitor");
+        using IDisposable planted = FileLinks.CreateJunction(app, elsewhere);
+        var store = new SettingsStore(Path.Combine(app, "settings.json"), trustedRoot: root);
+
+        Assert.Equal(AppSettings.DefaultMaxRows, store.Load().MaxRows);
+    }
+
+    [Fact]
+    public void Load_IgnoresAHardLinkedFile()
+    {
+        using var temp = new TempDirectory();
+        var store = new SettingsStore(temp.PathOf("settings.json"));
+        File.WriteAllText(temp.PathOf("other.json"), """{ "MaxRows": 5000 }""");
+        FileLinks.CreateHardLink(store.FilePath, temp.PathOf("other.json"));
+
+        Assert.Equal(AppSettings.DefaultMaxRows, store.Load().MaxRows);
     }
 
     [Fact]
