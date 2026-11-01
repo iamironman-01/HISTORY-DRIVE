@@ -311,8 +311,8 @@ away.
 - Turning **Record log** off, closing the app or the end of a `drivemon` run waits while a slow drive still
   takes the rest of the log, for up to 30 seconds. `drivemon` prints `Finishing the CSV log...` when that
   takes more than a second, and Ctrl+C does not cut it short. The app's window stays open with the banner
-  *Saving the activity log… DriveMonitor closes when it is done.*, with Start, Record log and Export greyed
-  out, and closes by itself.
+  *Saving the activity log… DriveMonitor closes when it is done.*, with Start/Stop, Record log and the three
+  Export commands greyed out, and closes by itself.
 - When the drive takes nothing for 5 seconds, DriveMonitor gives up within 1 more second and counts the rest
   as dropped. `drivemon` then reports the log as failed and exits with code 1:
 
@@ -321,8 +321,8 @@ away.
   ```
 
   If the drive is still stuck by then, the rows DriveMonitor was writing are not in the dropped count.
-- When Windows logs off or shuts down, the app saves its settings, stops monitoring and waits at most 3
-  seconds for the log, so the last events can be missing from it.
+- When Windows logs off or shuts down, the app saves its settings, then waits at most 3 seconds in all while
+  it stops monitoring and saves the log, so the last events can be missing from it.
 - After an error that ends the app, it stops monitoring and the log before it shows its message. With a log
   on a slow drive, the window can stop responding for up to about 40 seconds first.
 
