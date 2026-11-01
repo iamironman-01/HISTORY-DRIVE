@@ -50,7 +50,7 @@ publishes from `main` is the supported one.
   name may hold characters that change how text is shown. DriveMonitor replaces control characters and
   bidirectional formatting characters in every process name with `?`, so that a name cannot fake a line or
   read as another name in the app, the CSV files or `drivemon`'s output. `drivemon` does the same for the
-  paths and messages it prints.
+  paths and messages it prints in live monitoring.
 
 ## The privileges it needs, and why
 
@@ -100,8 +100,9 @@ point, and keeps it open, so that nobody can rename, delete or replace it meanwh
 and deletes each file relative to that open folder, not by path, and refuses a name that is a link, a folder
 or a file with more than one name (a hard link). The checks are made on the open handles, so nothing can be
 swapped in between a check and the use. FAT and exFAT have no links; on a network share the checks rest on
-the server. The one move by path is `settings.json` to `settings.bad.json` after a failed start. An export
-and the `--report` file are written by path, to the file you name.
+the server. Two steps go by path: the app reads `settings.json` when it starts, and moves it to
+`settings.bad.json` after a failed start. An export and the `--report` file are written by path, to the file
+you name.
 
 One limit remains: links in the folders above are followed. A program running as you can, for example,
 replace `%LOCALAPPDATA%\DriveMonitor` with a junction between two recordings and so choose the folder that
