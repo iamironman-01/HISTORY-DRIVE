@@ -267,15 +267,25 @@ public sealed class MonitorEngine : IDisposable, IFileIoSink
     /// Starts writing every published event to a CSV file (replacing any current log), within the size
     /// and free-space limits in <see cref="Options"/>.
     /// </summary>
-    /// <exception cref="IOException">The file cannot be created, or its drive is already short of free space.</exception>
-    public void StartLog(string filePath)
+    /// <param name="filePath">The log's first file.</param>
+    /// <param name="trustedRoot">
+    /// A folder above the file whose path is trusted, such as <c>%LOCALAPPDATA%</c>; no link below it is followed
+    /// (see <see cref="CsvActivityLog"/>). Null for a path the user chose, whose folder is created by path.
+    /// </param>
+    /// <exception cref="ArgumentException">The file is not below <paramref name="trustedRoot"/>.</exception>
+    /// <exception cref="IOException">
+    /// The file cannot be created, it or a folder on its way is a link that is not followed, or its drive is
+    /// already short of free space.
+    /// </exception>
+    public void StartLog(string filePath, string? trustedRoot = null)
     {
         const long MB = 1024 * 1024;
         var log = new CsvActivityLog(
             filePath,
             maxFileBytes: Options.MaxLogFileMB * MB,
             maxFiles: Options.MaxLogFiles,
-            minFreeBytes: Options.MinLogFreeSpaceMB * MB);
+            minFreeBytes: Options.MinLogFreeSpaceMB * MB,
+            trustedRoot: trustedRoot);
         Interlocked.Exchange(ref _log, log)?.Dispose();
     }
 
