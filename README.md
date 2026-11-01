@@ -191,7 +191,10 @@ that off). Only one DriveMonitor window runs per Windows session.
 - **Live activity**: one row per operation (or group of repeated operations), with time, operation, count,
   size, file, process, PID and details such as `created`, `size → 1,000 bytes`, `failed: access denied`,
   `paging` or `unbuffered`. Hover over a file name for the full path, the new name of a renamed file, the
-  range of bytes read or written, and the NTSTATUS code.
+  range of bytes read or written, and the NTSTATUS code. `folder` marks an operation that DriveMonitor knows
+  to be on a folder. Windows reports a folder's delete or rename without saying that it is a folder, so
+  DriveMonitor marks one only when it already knows the path as a folder: opened or created as one, listed,
+  or the new name of a renamed folder, since DriveMonitor started or since the last **Clear**.
 - **Files**: totals per file since DriveMonitor started or since the last **Clear**: reads, bytes read,
   writes, bytes written, opens, a status (Created, Modified, Read only, Resized, Renamed → new name, Deleted, Moved to the
   Recycle Bin, ...), the last activity and operation, and up to three of the programs that used the file.
@@ -225,6 +228,12 @@ callback errors, session restarts, whether names of already open files were requ
 reports new names of renamed files, failed operations and the log file.
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) explains what to do about lost and unnamed events.
 
+Banners above the tables report what needs attention: red for errors, blue for information, and amber when
+administrator rights are missing or when monitoring started although another program holds the guard that
+keeps two DriveMonitors off one kernel session (see
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#another-drivemonitor-window-or-command-is-already-monitoring)).
+Screen readers read each new banner out.
+
 ### Record log and export
 
 - **Record log** files are named `activity-YYYYMMDD-HHMMSS.csv` and have one row per event, with the
@@ -237,6 +246,14 @@ reports new names of renamed files, failed operations and the log file.
   or *The activity log stopped: ...*, and **Record log** turns off. DriveMonitor never deletes earlier
   recordings. What to do when a log stops:
   [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#the-activity-log-stops-or-is-split-into-several-files).
+- DriveMonitor writes the log as administrator, so it refuses links at the log's folder and files: when the
+  `Logs` folder is a junction or a symbolic link, or one of the log's file names is taken by a link, a folder
+  or a file with more than one name (a hard link), the log does not start, or stops, with a banner that names
+  the path. While a recording runs, its folder cannot be renamed or deleted.
+- Closing the window while recording saves the log first: the window stays open with the banner *Saving the
+  activity log… DriveMonitor closes when it is done.* and closes by itself once the log is saved, which can
+  take up to 30 seconds on a slow drive. When Windows logs off or shuts down, DriveMonitor waits at most 3
+  seconds, so the last events can be missing from the log.
 - **Export → Live activity** saves the visible rows as they are grouped, with first and last time, count,
   total bytes and the range of offsets. **Files** and **Processes** exports save every row, whatever the
   search box contains.
@@ -248,7 +265,7 @@ reports new names of renamed files, failed operations and the log file.
 
 `drivemon.exe` needs an administrator terminal, except for `--list`, `--version` and `--help`. It monitors until you
 press Ctrl+C or the `--duration` ends, then (unless `--no-summary` is given) prints totals per drive, the 20
-busiest files and the kernel counters.
+busiest files, the kernel counters and, with `--csv`, a line for the CSV log.
 
 ```text
 drivemon [options]              Monitor drives and print each file operation
@@ -274,8 +291,8 @@ drivemon --self-test [E:]       Verify capture on a drive (uses a temporary fold
 | `--version` | Print the version and the commit it was built from, for example `drivemon 0.1.0+<commit>`, and exit. |
 
 Options are not case-sensitive. The exit code is 0 on success; 1 when monitoring could not start (including
-a `--csv` file that cannot be written) or the self-test failed or was cancelled; and 2 for invalid options,
-such as a `--duration` out of range.
+a `--csv` file that cannot be written), when the `--csv` log stopped on an error during the run, or when the
+self-test failed or was cancelled; and 2 for invalid options, such as a `--duration` out of range.
 
 Without `--drives`, `drivemon` keeps its selection up to date while it runs. Every 200 ms it checks whether a
 drive letter came or went, and every 10 seconds it reads the drive list anyway. It adds each new drive of the
@@ -285,8 +302,27 @@ is none yet. A drive that is pulled out stays selected, so it is monitored again
 
 If the `--csv` file cannot be created, for example because another program has it open or its drive has less
 than 512 MB free, `drivemon` prints `Cannot write the CSV file: <reason>` and exits with code 1 before
-monitoring starts. A log that stops later, because its drive runs short of space or is removed, is not
-reported: monitoring goes on, and the CSV file ends at that point.
+monitoring starts. If the log stops later, because its drive runs short of space or is removed or a write
+fails, `drivemon` says so on stderr within a moment and goes on monitoring; the CSV file ends at that point:
+
+```text
+The CSV log stopped: Only 300 MB is free on E:\; the activity log stops when less than 512 MB is left. 1,234 rows were written to E:\logs\activity.csv; later events are not logged.
+```
+
+At the end, `drivemon` writes the rows still queued and closes the log before the summary. When that takes
+more than a second, it prints `Finishing the CSV log...` first; on a slow drive it can take up to 30 seconds,
+and Ctrl+C does not cut it short. A failure that was not reported yet is reported then, also with
+`--no-summary`, in a line that ends `... and <n> were dropped.` The summary ends with a line such as
+`CSV log: E:\logs\activity.csv through activity.002.csv  rows written: 1,234,567  rows dropped: 0`, which
+adds `error:` and the reason when the log failed. A log that failed makes the exit code 1.
+
+When another program holds the guard that keeps two DriveMonitors off one session name, but no session of
+that name is running, `drivemon` starts monitoring anyway, about 2 seconds later, and says so on stderr
+before the `Monitoring` line (the self-test, after `Session started in N ms`):
+
+```text
+Another program holds Global\DriveMonitor.Session.DriveMonitor-CLI, which keeps two DriveMonitors from sharing the session "DriveMonitor-CLI", but no such session is running, so monitoring started anyway.
+```
 
 ```powershell
 drivemon --list
@@ -316,8 +352,11 @@ DELETE, RENAME, SETINFO (metadata changes), FLUSH and LIST. For example:
 
 By default `drivemon` prints reads, writes, creates, deletes and renames; the options above add the rest.
 Control characters and Unicode bidirectional formatting characters in paths, process names and details are
-printed as `?`, so that a file or program name cannot overwrite or fake a line; `--list` and the
-`Now monitoring` line do the same for volume labels and drive models.
+printed as `?`, so that a file or program name cannot overwrite or fake a line. `--list` and the
+`Now monitoring` line do the same for volume labels and drive models, and so do the lines that carry a path
+or a message: the start warning, the CSV log's lines, a start failure, and the kernel session's fault and
+restart messages. The engine already replaces these characters in process names, so the app and the CSV files
+show them as `?` too.
 
 ## The self-test
 
@@ -394,10 +433,12 @@ and uploads each report as an artifact (`selftest-report-windows-2022`, `selftes
 
 - **Administrator rights are required.** The app asks for elevation every time it starts; `drivemon` must
   run in an administrator terminal.
-- **About one second of delay.** Windows hands over kernel trace events in batches. DriveMonitor asks for a
-  batch every 500 ms and refreshes the window four times a second, so events usually appear about a second
-  after they happen. Events are published in the order the operations started, so an operation still
-  waiting for its completion can hold back the ones after it for up to 2 seconds.
+- **About one second of delay.** Windows hands over kernel trace events in batches, each processor's on its
+  own. DriveMonitor asks for a batch every 500 ms, holds each event back for up to about 750 ms so that it
+  can match the events in the order the kernel logged them, and refreshes the window four times a second
+  (`drivemon` prints five times a second). Events therefore usually appear 0.75 to 1.6 seconds after they
+  happen. Events are published in the order the operations started, so an operation still waiting for its
+  completion can hold back the ones after it for up to 2 seconds more.
 - **Unnamed I/O.** The kernel names a file when it is opened. For files that were already open when
   monitoring started, DriveMonitor asks Windows for their names. I/O whose file name is still unknown cannot
   be tied to a drive, so it is not shown; it is only counted (**Unnamed** in the status bar, for all drives
@@ -415,13 +456,15 @@ and uploads each report as an artifact (`selftest-report-windows-2022`, `selftes
   and the Windows Search indexer read files, for example right after they were written. These are real
   reads, shown under the program that made them.
 - **The new name of a renamed file** comes from an undocumented Windows event. When Windows does not send
-  it, a rename shows only the old name ("renamed or moved").
+  it, or the new name it reports is on another drive (a rename cannot leave its drive, so that name belongs
+  to another operation), a rename shows only the old name ("renamed or moved").
 - **The first moment of a new drive is not seen.** With **Monitor new USB drives automatically** on, the app
   watches a new pendrive from the moment Windows reports the new volume; `drivemon` watches it from its next
   check for new drive letters, every 200 ms. What happens on the drive before that is not captured.
 - **The activity log has limits.** Each file of a Record log or a `--csv` log holds up to 100 MB, a log keeps
   its 10 newest files, and it stops when less than 512 MB is free on its drive. The app keeps every earlier
-  recording until you delete it, and `drivemon` does not report a log that stopped during the run.
+  recording until you delete it. A log that stops early is reported: by a banner in the app, and by
+  `drivemon` on stderr and with exit code 1.
 - **Bounded memory.** Live activity keeps the newest 20,000 rows by default, and statistics track up to
   200,000 files and 50,000 processes; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#data-bounding-caps) lists
   the limits.
