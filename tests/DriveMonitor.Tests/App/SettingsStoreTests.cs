@@ -5,7 +5,10 @@ using DriveMonitor.Tests.TestSupport;
 
 namespace DriveMonitor.Tests.App;
 
-/// <summary>Loading the app's settings file, including values a damaged or hand-edited file may contain.</summary>
+/// <summary>
+/// The app's settings file: loading values a damaged or hand-edited file may contain, and saving it or setting it
+/// aside without following links.
+/// </summary>
 public sealed class SettingsStoreTests
 {
     [Fact]
@@ -79,6 +82,64 @@ public sealed class SettingsStoreTests
 
         Assert.Null(store.TrySetAside());
         Assert.Empty(Directory.GetFiles(temp.FullPath));
+    }
+
+    [Fact]
+    public void TrySave_BelowATrustedRoot_CreatesTheFolderAndWritesTheFile()
+    {
+        using var temp = new TempDirectory();
+        string app = temp.PathOf("DriveMonitor");
+        var store = new SettingsStore(Path.Combine(app, "settings.json"), trustedRoot: temp.FullPath);
+
+        Assert.True(store.TrySave(new AppSettings { MaxRows = 5000 }));
+
+        Assert.Equal(new[] { store.FilePath }, Directory.EnumerateFileSystemEntries(app));
+        Assert.Equal(5000, store.Load().MaxRows);
+    }
+
+    [Fact]
+    public void TrySave_BelowATrustedRoot_RefusesAJunctionInPlaceOfTheFolder()
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        string app = Path.Combine(root, "DriveMonitor");
+        using IDisposable planted = FileLinks.CreateJunction(app, victim);
+        var store = new SettingsStore(Path.Combine(app, "settings.json"), trustedRoot: root);
+
+        Assert.False(store.TrySave(new AppSettings()));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+    }
+
+    [Fact]
+    public void TrySetAside_BelowATrustedRoot_RenamesTheFile()
+    {
+        using var temp = new TempDirectory();
+        string app = Directory.CreateDirectory(temp.PathOf("DriveMonitor")).FullName;
+        var store = new SettingsStore(Path.Combine(app, "settings.json"), trustedRoot: temp.FullPath);
+        File.WriteAllText(store.FilePath, """{ "MaxRows": 5000 }""");
+
+        Assert.Equal(Path.Combine(app, "settings.bad.json"), store.TrySetAside());
+        Assert.Equal(new[] { Path.Combine(app, "settings.bad.json") }, Directory.EnumerateFileSystemEntries(app));
+    }
+
+    [Fact]
+    public void TrySetAside_BelowATrustedRoot_RefusesAJunctionInPlaceOfTheFolder()
+    {
+        // File.Move followed it: the elevated app moved and replaced whatever files the junction's target had of
+        // those names.
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        File.WriteAllText(Path.Combine(victim, "settings.json"), "keep me");
+        File.WriteAllText(Path.Combine(victim, "settings.bad.json"), "keep me too");
+        string app = Path.Combine(root, "DriveMonitor");
+        using IDisposable planted = FileLinks.CreateJunction(app, victim);
+        var store = new SettingsStore(Path.Combine(app, "settings.json"), trustedRoot: root);
+
+        Assert.Null(store.TrySetAside());
+        Assert.Equal("keep me", File.ReadAllText(Path.Combine(victim, "settings.json")));
+        Assert.Equal("keep me too", File.ReadAllText(Path.Combine(victim, "settings.bad.json")));
     }
 
     private static AppSettings LoadWindow(TempDirectory temp, double left, double top, double width, double height)

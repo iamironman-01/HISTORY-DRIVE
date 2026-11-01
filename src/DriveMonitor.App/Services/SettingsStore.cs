@@ -122,9 +122,17 @@ public sealed class SettingsStore
         AllowTrailingCommas = true,
     };
 
-    public SettingsStore(string? filePath = null)
+    private readonly string? _trustedRoot;
+
+    /// <param name="filePath">The settings file; null for <c>%LOCALAPPDATA%\DriveMonitor\settings.json</c>.</param>
+    /// <param name="trustedRoot">
+    /// A folder above the file below which no link is followed when the file is written or set aside;
+    /// <see cref="TrustedRoot"/> for the default file. Without one only the file's own folder is checked.
+    /// </param>
+    public SettingsStore(string? filePath = null, string? trustedRoot = null)
     {
         FilePath = filePath ?? Path.Combine(AppDataDirectory, "settings.json");
+        _trustedRoot = trustedRoot ?? (filePath is null ? TrustedRoot : null);
     }
 
     /// <summary>
@@ -162,20 +170,18 @@ public sealed class SettingsStore
         return new AppSettings();
     }
 
-    /// <returns>False when the file could not be written, or when it or its folder is a link.</returns>
+    /// <returns>False when the file could not be written, or when it or a folder on its way is a link.</returns>
     public bool TrySave(AppSettings settings)
     {
         try
         {
             string fullPath = Path.GetFullPath(FilePath);
-            string folderPath = Path.GetDirectoryName(fullPath)!;
             string name = Path.GetFileName(fullPath);
             byte[] json = JsonSerializer.SerializeToUtf8Bytes(settings, JsonOptions);
-            Directory.CreateDirectory(folderPath);
 
             // The app runs elevated, and any program of the user can plant a junction or link in this
-            // folder; LinkSafeFolder refuses links instead of following them.
-            using LinkSafeFolder folder = LinkSafeFolder.Open(folderPath);
+            // folder, or in place of it; LinkSafeFolder refuses links instead of following them.
+            using LinkSafeFolder folder = OpenFolder(Path.GetDirectoryName(fullPath)!, create: true);
 
             // Write a temporary file first so a crash or full disk never leaves a truncated file behind.
             using FileStream temporary = folder.OpenFile(name + ".tmp", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, allowRename: true);
@@ -184,7 +190,7 @@ public sealed class SettingsStore
             folder.Rename(temporary, name);
             return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             return false;
         }
@@ -201,13 +207,31 @@ public sealed class SettingsStore
         {
             if (!File.Exists(FilePath))
                 return null;
+            string fullPath = Path.GetFullPath(FilePath);
             string target = Path.ChangeExtension(FilePath, ".bad.json");
-            File.Move(FilePath, target, overwrite: true);
+
+            // Renamed through the folder, as TrySave writes: a link on the way, at the file or at the new name is
+            // refused, so the elevated app cannot be made to move or replace another file.
+            using LinkSafeFolder folder = OpenFolder(Path.GetDirectoryName(fullPath)!, create: false);
+            using FileStream file = folder.OpenFile(
+                Path.GetFileName(fullPath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, allowRename: true);
+            folder.Rename(file, Path.GetFileName(target));
             return target;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             return null;
         }
+    }
+
+    /// <summary>The file's folder: below the trusted root without following a link, or else refused only when it is a link itself.</summary>
+    private LinkSafeFolder OpenFolder(string folderPath, bool create)
+    {
+        if (_trustedRoot is not null)
+            return LinkSafeFolder.OpenBelow(_trustedRoot, folderPath, create);
+
+        if (create)
+            Directory.CreateDirectory(folderPath);
+        return LinkSafeFolder.Open(folderPath);
     }
 }
