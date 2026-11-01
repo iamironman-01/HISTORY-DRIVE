@@ -235,6 +235,32 @@ public sealed class ReorderBufferTests
             Assert.Empty(errors);
     }
 
+    [Fact]
+    public void Timer_PassesOnABurstThatArrivedOverSeveralTicks_WithoutFurtherArrivals()
+    {
+        // The burst arrived over several clock ticks, which fall due one after the other: each time the timer goes off
+        // it passes on what has fallen due and must set itself again for the rest, or that waits for the next arrival.
+        var errors = new List<Exception>();
+        var sink = new RecordingSink();
+        using var buffer = new ReorderBuffer(sink, windowMs: 200, error => { lock (errors) errors.Add(error); });
+        IFileIoSink front = buffer;
+
+        front.OnForeignBegin(0x10, timestampQpc: 100);
+        Thread.Sleep(40); // a later tick, well within the window
+        front.OnBegin(Begin(0x20, qpc: 200));
+        Thread.Sleep(40);
+        front.OnComplete(0x20, timestampQpc: 300, extraInfo: 4096, ntStatus: 0);
+        Thread.Sleep(40);
+        front.OnPathOperation(0x30, timestampQpc: 400, @"E:\renamed.txt");
+
+        Assert.True(SpinWait.SpinUntil(() => sink.Calls.Count == 4, TimeSpan.FromSeconds(10)), $"the timer released {sink.Calls.Count} of 4");
+        Assert.Equal(new[] { "foreign", "begin", "complete", "path" }, sink.Calls.ConvertAll(c => c.Kind));
+        Assert.Equal(new long[] { 100, 200, 300, 400 }, sink.Qpcs);
+        Assert.Equal(0, buffer.Count);
+        lock (errors)
+            Assert.Empty(errors);
+    }
+
     [Theory]
     [InlineData(0, 1)]
     [InlineData(-1, 1)]
