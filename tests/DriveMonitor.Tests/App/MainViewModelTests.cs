@@ -283,6 +283,33 @@ public sealed class MainViewModelTests : IDisposable
         await shutDown.WaitAsync(Timeout);
     }
 
+    [Fact]
+    public async Task ShutDownAsync_WhenStoppingTheSessionFails_StillEndsTheLogAndReportsTheError()
+    {
+        using var temp = new TempDirectory();
+        CsvActivityLog log = StartLog(temp);
+        var failure = new InvalidOperationException("The kernel session would not stop.");
+        var reported = new List<Exception>();
+        _viewModel.ReportError = (error, _) =>
+        {
+            lock (reported)
+                reported.Add(error);
+        };
+        _viewModel.StopEngine = () => throw failure;
+
+        await _ui.Invoke(_viewModel.ShutDownAsync).WaitAsync(Timeout);
+
+        Assert.Null(_viewModel.Engine.Log);
+        using (new FileStream(log.FilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            // Opened without sharing: the log has closed the file.
+        }
+
+        Assert.Contains(Event.Path, File.ReadAllText(log.FilePath), StringComparison.Ordinal);
+        lock (reported)
+            Assert.Same(failure, Assert.Single(reported));
+    }
+
     private List<BannerViewModel> Banners() => _ui.Invoke(() => _viewModel.Banners.ToList());
 
     /// <summary>Collects, on the UI thread, every banner shown from now on, also one closed again since.</summary>

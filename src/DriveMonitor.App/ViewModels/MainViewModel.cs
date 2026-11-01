@@ -116,6 +116,7 @@ public sealed partial class MainViewModel : ObservableObject
             _engine.Start();
             return _engine.StartWarning;
         };
+        StopEngine = _engine.Stop;
         DisposeEngine = _engine.Dispose;
 
         _tickTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = TickInterval };
@@ -143,6 +144,15 @@ public sealed partial class MainViewModel : ObservableObject
     /// (<see cref="MonitorEngine.StartWarning"/>). Tests replace it to start no kernel session.
     /// </summary>
     internal Func<string?> StartEngine { get; set; }
+
+    /// <summary>
+    /// The shutdown's first step, on the thread pool: <see cref="MonitorEngine.Stop"/>, which stops the kernel session.
+    /// Tests replace it to make stopping fail.
+    /// </summary>
+    internal Action StopEngine { get; set; }
+
+    /// <summary>Where the shutdown reports what failed in it; tests replace it to leave errors.log alone.</summary>
+    internal Action<Exception, string> ReportError { get; set; } = ErrorLog.Write;
 
     /// <summary>
     /// The last step of the shutdown, on the thread pool: <see cref="MonitorEngine.Dispose"/>, which ends the activity log
@@ -526,7 +536,7 @@ public sealed partial class MainViewModel : ObservableObject
             }
             catch (Exception ex)
             {
-                ErrorLog.Write(ex, "shutdown");
+                ReportError(ex, "shutdown");
             }
         });
 
@@ -839,7 +849,16 @@ public sealed partial class MainViewModel : ObservableObject
 
         // The kernel session first, because it outlives the process: while Windows logs off, App waits only briefly
         // for this before the process may be ended.
-        _engine.Stop();
+        try
+        {
+            StopEngine();
+        }
+        catch (Exception ex)
+        {
+            // The shutdown goes on: Dispose below stops the session again and ends the activity log, which would
+            // otherwise keep its file open and lose the events it still holds.
+            ReportError(ex, "shutdown: stopping the kernel session");
+        }
 
         // A log that "Record log" is still saving is no longer the engine's, so Dispose would not wait for it. Saving
         // a log takes at most about half a minute; see CsvActivityLog.Dispose.
