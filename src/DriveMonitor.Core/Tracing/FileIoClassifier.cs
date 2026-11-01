@@ -229,9 +229,23 @@ internal static class FileIoClassifier
         io.TargetPath is { Length: >= 3 } target
         && target[1] == ':'
         && char.ToUpperInvariant(target[0]) == char.ToUpperInvariant(io.Drive)
-        && !string.Equals(target, io.Path, StringComparison.OrdinalIgnoreCase)
+        && !IsSamePath(target, io.Path)
             ? target
             : null;
+
+    /// <summary>
+    /// True when <paramref name="target"/> names <paramref name="path"/> as it already is. The folders above the
+    /// last name compare without case, as Windows looks them up. The last name compares with case: Windows keeps
+    /// the case a name is given, so renaming "photos" to "Photos" is a real rename.
+    /// </summary>
+    private static bool IsSamePath(string target, string path)
+    {
+        int name = target.LastIndexOf('\\');
+        return name >= 0
+            && name == path.LastIndexOf('\\')
+            && target.AsSpan(0, name).Equals(path.AsSpan(0, name), StringComparison.OrdinalIgnoreCase)
+            && target.AsSpan(name).SequenceEqual(path.AsSpan(name));
+    }
 
     private static string DescribeRename(string? target) => target switch
     {
