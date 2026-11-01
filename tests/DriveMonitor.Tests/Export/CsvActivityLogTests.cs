@@ -492,6 +492,113 @@ public sealed class CsvActivityLogTests
         Assert.Equal("an earlier log, which must survive\r\n", Encoding.UTF8.GetString(ReadShared(path)));
     }
 
+    // ---- a trusted root, as the app passes %LOCALAPPDATA% for %LOCALAPPDATA%\DriveMonitor\Logs ----
+
+    [Fact]
+    public void TrustedRoot_TheFoldersBelowItAreCreated_AndTheLogRotatesAndDeletesItsPartsThere()
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string logs = Path.Combine(root, "DriveMonitor", "Logs");
+        var log = new CsvActivityLog(Path.Combine(logs, "log.csv"), maxFileBytes: HeaderBytes + (3 * RowBytes), maxFiles: 2, trustedRoot: root);
+
+        Assert.False(CanOpenForDelete(logs), "the folder can be renamed or deleted while the log runs");
+        for (int i = 0; i < 10; i++)
+            log.Write(Event(i));
+        log.Dispose();
+
+        Assert.Null(log.Error);
+        Assert.Equal(10L, log.Written);
+        string[] kept = [Path.Combine(logs, "log.003.csv"), Path.Combine(logs, "log.004.csv")];
+        Assert.Equal(kept.Order(), Directory.GetFiles(logs).Order());
+        Assert.Equal(Enumerable.Range(6, 4).Select(i => Event(i).Path), kept.SelectMany(PathsIn));
+        Assert.True(CanOpenForDelete(logs), "the folder is still held after the log closed");
+    }
+
+    [Fact]
+    public void TrustedRoot_AJunctionInPlaceOfAFolderAboveTheLogFolder_IsRefused_AndNothingIsWrittenThroughIt()
+    {
+        // The review's case: while no log runs, a program without elevation replaces %LOCALAPPDATA%\DriveMonitor
+        // with a junction to a folder of its choice that has a Logs folder, here with a file of the log's name.
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string elsewhere = Directory.CreateDirectory(temp.PathOf("elsewhere")).FullName;
+        string elsewhereLog = Path.Combine(Directory.CreateDirectory(Path.Combine(elsewhere, "Logs")).FullName, "activity.csv");
+        File.WriteAllText(elsewhereLog, "keep me");
+        string app = Path.Combine(root, "DriveMonitor");
+        using IDisposable planted = FileLinks.CreateJunction(app, elsewhere);
+
+        IOException error = Assert.Throws<IOException>(() => new CsvActivityLog(Path.Combine(app, "Logs", "activity.csv"), trustedRoot: root));
+
+        Assert.Equal($"'{app}' is a junction, symbolic link or other reparse point; it is not followed.", error.Message);
+        Assert.Equal(new[] { elsewhereLog }, Directory.EnumerateFileSystemEntries(Path.GetDirectoryName(elsewhereLog)!));
+        Assert.Equal("keep me", File.ReadAllText(elsewhereLog));
+    }
+
+    [Fact]
+    public void TrustedRoot_ALogFolderThatIsAJunction_IsRefused()
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        string logs = Path.Combine(Directory.CreateDirectory(Path.Combine(root, "DriveMonitor")).FullName, "Logs");
+        using IDisposable planted = FileLinks.CreateJunction(logs, victim);
+
+        IOException error = Assert.Throws<IOException>(() => new CsvActivityLog(Path.Combine(logs, "log.csv"), trustedRoot: root));
+
+        Assert.Contains($"'{logs}' is a junction", error.Message);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+    }
+
+    [Fact]
+    public void TrustedRoot_TheRootItselfIsTrusted_EvenWhenItIsAJunction()
+    {
+        // An administrator may have redirected %LOCALAPPDATA%; the log may also be written directly in the root.
+        using var temp = new TempDirectory();
+        string redirected = Directory.CreateDirectory(temp.PathOf("redirected")).FullName;
+        string root = temp.PathOf("Local");
+        using IDisposable junction = FileLinks.CreateJunction(root, redirected);
+
+        using (var log = new CsvActivityLog(Path.Combine(root, "log.csv"), trustedRoot: root))
+            log.Write(Event(0));
+
+        Assert.Equal(new[] { Event(0).Path }, PathsIn(Path.Combine(redirected, "log.csv")));
+    }
+
+    [Theory]
+    [InlineData(@"..\log.csv")]
+    [InlineData(@"..\elsewhere\log.csv")]
+    [InlineData(@"..\Local2\log.csv")]
+    public void TrustedRoot_AFileThatIsNotBelowIt_IsRejectedBeforeAnythingIsCreated(string relativeToRoot)
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string path = Path.GetFullPath(Path.Combine(root, relativeToRoot));
+
+        Assert.Throws<ArgumentException>(() => new CsvActivityLog(path, trustedRoot: root));
+
+        Assert.Equal(new[] { root }, Directory.EnumerateFileSystemEntries(temp.FullPath));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+    }
+
+    [Fact]
+    public void WithoutATrustedRoot_AJunctionAboveTheLogFolder_IsStillFollowed()
+    {
+        // drivemon --csv: the user chose the path, links on the way included; only the log's folder itself and its
+        // files are checked. It is what the app did with its own folder before it passed a trusted root.
+        using var temp = new TempDirectory();
+        string elsewhere = Directory.CreateDirectory(temp.PathOf("elsewhere")).FullName;
+        string elsewhereLogs = Directory.CreateDirectory(Path.Combine(elsewhere, "Logs")).FullName;
+        string chosen = temp.PathOf("chosen");
+        using IDisposable junction = FileLinks.CreateJunction(chosen, elsewhere);
+
+        using (new CsvActivityLog(Path.Combine(chosen, "Logs", "activity.csv")))
+        {
+        }
+
+        Assert.Equal(HeaderLine, File.ReadAllText(Path.Combine(elsewhereLogs, "activity.csv")));
+    }
+
     /// <summary>Whether another program could rename or delete the folder now, which takes an open with delete access.</summary>
     private static bool CanOpenForDelete(string folder)
     {

@@ -396,4 +396,283 @@ public sealed class LinkSafeFolderTests
         Assert.True(File.Exists(Path.Combine(app, "activity.csv")));
         Assert.Equal("keep me", File.ReadAllText(victim));
     }
+
+    // ---- OpenBelow: the folders below a trusted root such as %LOCALAPPDATA%, none of them followed if a link ----
+
+    [Fact]
+    public void OpenBelow_CreatesTheMissingFoldersBelowTheRoot()
+    {
+        using var temp = new TempDirectory();
+        string logs = Path.Combine(temp.FullPath, "DriveMonitor", "Logs");
+
+        using (LinkSafeFolder folder = LinkSafeFolder.OpenBelow(temp.FullPath, logs, create: true))
+        {
+            Assert.Equal(logs, folder.FullPath);
+            using FileStream log = folder.OpenFile("activity.csv", FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            log.Write("row"u8);
+        }
+
+        Assert.Equal("row", File.ReadAllText(Path.Combine(logs, "activity.csv")));
+    }
+
+    [Fact]
+    public void OpenBelow_WithoutCreate_CreatesNothing()
+    {
+        using var temp = new TempDirectory();
+
+        Assert.Throws<IOException>(() => LinkSafeFolder.OpenBelow(temp.FullPath, temp.PathOf("DriveMonitor")));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(temp.FullPath));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(@"DriveMonitor\Logs")]
+    public void OpenBelow_TrustsTheRoot_EvenWhenItIsAJunction(string below)
+    {
+        // An administrator may have redirected %LOCALAPPDATA%; only the folders below it are checked.
+        using var temp = new TempDirectory();
+        string redirected = Directory.CreateDirectory(temp.PathOf("redirected")).FullName;
+        string root = temp.PathOf("Local");
+        using IDisposable junction = FileLinks.CreateJunction(root, redirected);
+
+        using (LinkSafeFolder folder = LinkSafeFolder.OpenBelow(root, below, create: true))
+        {
+            Assert.Equal(Path.Combine(root, below), folder.FullPath);
+            using FileStream log = folder.OpenFile("errors.log", FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            log.Write("entry"u8);
+        }
+
+        Assert.Equal("entry", File.ReadAllText(Path.Combine(redirected, below, "errors.log")));
+    }
+
+    [Fact]
+    public void OpenBelow_RefusesAJunctionOnAFolderOnTheWay_AndCreatesNothingThroughIt()
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        string app = Path.Combine(root, "DriveMonitor");
+        using IDisposable planted = FileLinks.CreateJunction(app, victim);
+
+        IOException error = Assert.Throws<IOException>(() => LinkSafeFolder.OpenBelow(root, Path.Combine(app, "Logs"), create: true));
+
+        Assert.Contains($"'{app}' is a junction", error.Message);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OpenBelow_RefusesAJunctionOnTheFolderItself(bool create)
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        string logs = Path.Combine(Directory.CreateDirectory(Path.Combine(root, "DriveMonitor")).FullName, "Logs");
+        using IDisposable planted = FileLinks.CreateJunction(logs, victim);
+
+        IOException error = Assert.Throws<IOException>(() => LinkSafeFolder.OpenBelow(root, logs, create));
+
+        Assert.Contains($"'{logs}' is a junction", error.Message);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+    }
+
+    [Fact]
+    public void OpenBelow_RefusesAJunctionPutInPlaceOfAFolderItCreatedBefore()
+    {
+        // Between two uses nothing holds the folders, so a program without elevation can move the folder it
+        // created away and plant a junction to a folder of its choice, which already has the expected subfolder.
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string app = Path.Combine(root, "DriveMonitor");
+        LinkSafeFolder.OpenBelow(root, Path.Combine(app, "Logs"), create: true).Dispose();
+        Directory.Move(app, temp.PathOf("moved"));
+        string elsewhere = Directory.CreateDirectory(temp.PathOf("elsewhere")).FullName;
+        string elsewhereLogs = Directory.CreateDirectory(Path.Combine(elsewhere, "Logs")).FullName;
+        using IDisposable planted = FileLinks.CreateJunction(app, elsewhere);
+
+        IOException error = Assert.Throws<IOException>(() => LinkSafeFolder.OpenBelow(root, Path.Combine(app, "Logs"), create: true));
+
+        Assert.Contains($"'{app}' is a junction", error.Message);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(elsewhereLogs));
+    }
+
+    [Fact]
+    public void OpenBelow_AFolderMadeAJunctionWhileHeld_GetsNothingCreatedThroughIt()
+    {
+        // A held folder cannot be renamed, deleted or replaced, but while it is still empty another program can make
+        // it a junction itself (FSCTL_SET_REPARSE_POINT through a handle that shares the holder's access). A name
+        // opened relative to the held handle then fails instead of being looked up through the junction; the walk
+        // opens each folder's child the same way.
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        string app = Path.Combine(root, "DriveMonitor");
+        IDisposable? planted = null;
+        try
+        {
+            using (LinkSafeFolder folder = LinkSafeFolder.OpenBelow(root, app, create: true))
+            {
+                planted = FileLinks.CreateJunction(app, victim);
+                Assert.True(File.GetAttributes(app).HasFlag(FileAttributes.ReparsePoint));
+
+                Assert.ThrowsAny<IOException>(() => folder.OpenFile("errors.log", FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read).Dispose());
+            }
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+        }
+        finally
+        {
+            // Only once the folder is closed: the junction cannot be removed while it is held.
+            planted?.Dispose();
+        }
+    }
+
+    [Fact]
+    public void OpenBelow_RefusesASymbolicLinkOnAFolderOnTheWay()
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        string app = Path.Combine(root, "DriveMonitor");
+        if (!FileLinks.TryCreateDirectorySymbolicLink(app, victim))
+            return; // Windows refuses symbolic links without administrator rights or Developer Mode; CI runs elevated.
+
+        IOException error = Assert.Throws<IOException>(() => LinkSafeFolder.OpenBelow(root, Path.Combine(app, "Logs"), create: true));
+
+        Assert.Contains($"'{app}' is a junction, symbolic link", error.Message);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OpenBelow_RefusesAFileWhereAFolderShouldBe(bool create)
+    {
+        using var temp = new TempDirectory();
+        File.WriteAllText(temp.PathOf("DriveMonitor"), "keep me");
+
+        IOException error = Assert.Throws<IOException>(() => LinkSafeFolder.OpenBelow(temp.FullPath, @"DriveMonitor\Logs", create));
+
+        Assert.Contains($"'{temp.PathOf("DriveMonitor")}' is not a folder", error.Message);
+        Assert.Equal("keep me", File.ReadAllText(temp.PathOf("DriveMonitor")));
+    }
+
+    [Theory]
+    [InlineData("..")]
+    [InlineData(@"..\elsewhere")]
+    [InlineData(@"..\Local2\Logs")]
+    [InlineData(@"DriveMonitor\..\..\elsewhere")]
+    public void OpenBelow_RejectsAPathOutsideTheRoot(string path)
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+
+        Assert.Throws<ArgumentException>(() => LinkSafeFolder.OpenBelow(root, path, create: true));
+        Assert.Equal(new[] { root }, Directory.EnumerateFileSystemEntries(temp.FullPath));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+    }
+
+    [Theory]
+    [InlineData(@"..\elsewhere")]
+    [InlineData(@"DriveMonitor\..\..\elsewhere")]
+    [InlineData(@".\DriveMonitor")]
+    [InlineData(@"\DriveMonitor")]
+    public void OpenBelow_RejectsTheDotsAndEmptyNamesThatAnExtendedPathKeeps(string below)
+    {
+        // Path.GetFullPath resolves them in other paths but leaves a \\?\ path as it is, so they reached the walk,
+        // which opened the root and created the folders before them first.
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string extendedRoot = @"\\?\" + root;
+
+        Assert.Throws<ArgumentException>(() => LinkSafeFolder.OpenBelow(extendedRoot, extendedRoot + @"\" + below, create: true));
+        Assert.Equal(new[] { root }, Directory.EnumerateFileSystemEntries(temp.FullPath));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+    }
+
+    [Theory]
+    [InlineData("DriveMonitor:stream")]
+    [InlineData(@"Drive*Monitor\Logs")]
+    [InlineData(@"DriveMonitor\Logs?")]
+    public void OpenBelow_RejectsANameThatIsNotAFolderName(string path)
+    {
+        using var temp = new TempDirectory();
+
+        Assert.Throws<ArgumentException>(() => LinkSafeFolder.OpenBelow(temp.FullPath, path, create: true));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(temp.FullPath));
+    }
+
+    [Fact]
+    public void OpenBelow_KeepsTheFolderFromBeingRenamedUntilDisposed()
+    {
+        using var temp = new TempDirectory();
+        string logs = Directory.CreateDirectory(temp.PathOf("Logs")).FullName;
+
+        using (LinkSafeFolder.OpenBelow(temp.FullPath, logs))
+            Assert.Throws<IOException>(() => Directory.Move(logs, temp.PathOf("moved")));
+
+        Directory.Move(logs, temp.PathOf("moved"));
+    }
+
+    [Fact]
+    public void OpenBelow_GivesAFolderThatOpensRenamesAndDeletesFilesAsOpenDoes()
+    {
+        using var temp = new TempDirectory();
+        string app = Path.Combine(temp.FullPath, "DriveMonitor");
+        using LinkSafeFolder folder = LinkSafeFolder.OpenBelow(temp.FullPath, app, create: true);
+
+        using (FileStream temporary = folder.OpenFile("settings.json.tmp", FileMode.CreateNew, FileAccess.Write, FileShare.None, allowRename: true))
+        {
+            temporary.Write("new"u8);
+            folder.Rename(temporary, "settings.json");
+        }
+
+        Assert.Equal("new", File.ReadAllText(Path.Combine(app, "settings.json")));
+        Assert.True(folder.DeleteFile("settings.json"));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(app));
+    }
+
+    [Fact]
+    public void OpenBelow_TakesARootPathLongerThanMaxPath()
+    {
+        using var temp = new TempDirectory();
+        string root = temp.FullPath;
+        while (root.Length <= 300)
+            root = Path.Combine(root, "a folder with a long name");
+        Directory.CreateDirectory(root);
+        string logs = Path.Combine(root, "DriveMonitor", "Logs");
+
+        using (LinkSafeFolder folder = LinkSafeFolder.OpenBelow(root, logs, create: true))
+        {
+            Assert.Equal(logs, folder.FullPath);
+            using FileStream log = folder.OpenFile("activity.csv", FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            log.Write("long"u8);
+        }
+
+        Assert.Equal("long", File.ReadAllText(Path.Combine(logs, "activity.csv")));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\me\AppData\Local", @"C:\Users\me\AppData\Local\DriveMonitor\Logs\activity.csv", true)]
+    [InlineData(@"C:\Users\me\AppData\Local", @"C:\Users\me\AppData\Local\activity.csv", true)]
+    [InlineData(@"C:\Users\me\AppData\Local", @"c:\users\ME\appdata\LOCAL\DriveMonitor\settings.json", true)]
+    [InlineData(@"C:\Users\me\AppData\Local\", @"C:\Users\me\AppData\Local\activity.csv", true)]
+    [InlineData(@"C:\Users\me\AppData\Local", @"DriveMonitor\Logs\activity.csv", true)]
+    [InlineData(@"C:\", @"C:\activity.csv", true)]
+    [InlineData(@"C:\Users\me\AppData\Local", @"C:\Users\me\AppData\Local", false)]
+    [InlineData(@"C:\Users\me\AppData\Local", @"C:\Users\me\AppData\Local\", false)]
+    [InlineData(@"C:\Users\me\AppData\Local", @"C:\Users\me\AppData\LocalLow\activity.csv", false)]
+    [InlineData(@"C:\Users\me\AppData\Local", @"C:\Users\me\AppData\Local\..\activity.csv", false)]
+    [InlineData(@"C:\Users\me\AppData\Local", @"D:\activity.csv", false)]
+    [InlineData(@"C:\", @"D:\activity.csv", false)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\DriveMonitor\Logs\activity.csv", true)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\..\activity.csv", false)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\DriveMonitor\..\..\LocalLow\activity.csv", false)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\.\activity.csv", false)]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local", @"\\?\C:\Users\me\AppData\Local\\activity.csv", false)]
+    public void IsBelow_IsTrueOnlyForWhatIsInTheRootOrAFolderBelowIt(string root, string path, bool expected)
+    {
+        Assert.Equal(expected, LinkSafeFolder.IsBelow(root, path));
+    }
 }

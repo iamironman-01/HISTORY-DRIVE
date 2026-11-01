@@ -84,6 +84,38 @@ public sealed class MonitorEngineSinkTests
     }
 
     [Fact]
+    public void StartLog_AfterDispose_ThrowsAndCreatesNoFile()
+    {
+        using var temp = new TempDirectory();
+        string path = temp.PathOf("activity.csv");
+        var engine = new MonitorEngine(new MonitorOptions { MinLogFreeSpaceMB = 0 });
+
+        engine.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => engine.StartLog(path));
+        Assert.Null(engine.Log);
+        Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public void StartLog_WhileTheEngineIsDisposed_ClosesTheNewLogAndThrows()
+    {
+        using var temp = new TempDirectory();
+        string path = temp.PathOf("activity.csv");
+        var engine = new MonitorEngine(new MonitorOptions { MinLogFreeSpaceMB = 0 });
+
+        // Dispose, and with it its StopLog, runs after the log is created but before the engine holds it.
+        engine.LogCreated = engine.Dispose;
+
+        Assert.Throws<ObjectDisposedException>(() => engine.StartLog(path));
+        Assert.Null(engine.Log);
+        using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            // Opened without sharing: the log has closed the file.
+        }
+    }
+
+    [Fact]
     public void TryAccept_PathOnAMonitoredDrive_ReturnsTheDrive()
     {
         using MonitorEngine engine = CreateEngine();
@@ -166,6 +198,23 @@ public sealed class MonitorEngineSinkTests
         Assert.Throws<IOException>(() => engine.StartLog(logPath));
         Assert.Null(engine.Log);
         Assert.False(File.Exists(logPath));
+    }
+
+    [Fact]
+    public void StartLog_WithATrustedRoot_FollowsNoLinkBelowIt_AndTakesNoFileOutsideIt()
+    {
+        using var temp = new TempDirectory();
+        string root = Directory.CreateDirectory(temp.PathOf("Local")).FullName;
+        string victim = Directory.CreateDirectory(temp.PathOf("victim")).FullName;
+        using IDisposable planted = FileLinks.CreateJunction(Path.Combine(root, "DriveMonitor"), victim);
+        using var engine = new MonitorEngine();
+
+        Assert.Throws<IOException>(() => engine.StartLog(Path.Combine(root, "DriveMonitor", "Logs", "activity.csv"), root));
+        Assert.Throws<ArgumentException>(() => engine.StartLog(temp.PathOf("activity.csv"), root));
+
+        Assert.Null(engine.Log);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(victim));
+        Assert.False(File.Exists(temp.PathOf("activity.csv")));
     }
 
     [Fact]

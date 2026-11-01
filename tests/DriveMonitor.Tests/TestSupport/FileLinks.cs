@@ -15,7 +15,10 @@ internal static class FileLinks
     private const uint FsctlSetReparsePoint = 0x0009_00A4;
     private const uint IoReparseTagMountPoint = 0xA000_0003;
 
-    /// <summary>Makes <paramref name="junction"/> a junction to the folder <paramref name="target"/>. Needs no privilege.</summary>
+    /// <summary>
+    /// Makes <paramref name="junction"/> a junction to the folder <paramref name="target"/>. Needs no privilege. An
+    /// existing empty folder becomes one too, even while another handle that shares writing holds it open.
+    /// </summary>
     /// <returns>Removes the junction again, which a recursive delete cannot do without administrator rights.</returns>
     public static IDisposable CreateJunction(string junction, string target)
     {
@@ -37,7 +40,8 @@ internal static class FileLinks
 
         Directory.CreateDirectory(junction);
         using SafeFileHandle handle = NativeMethods.CreateFileW(
-            junction, GenericWrite, 0, IntPtr.Zero, NativeMethods.OPEN_EXISTING, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
+            junction, GenericWrite, NativeMethods.FILE_SHARE_READ | NativeMethods.FILE_SHARE_WRITE, IntPtr.Zero,
+            NativeMethods.OPEN_EXISTING, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
         if (handle.IsInvalid)
             throw new Win32Exception(Marshal.GetLastPInvokeError());
         if (!NativeMethods.DeviceIoControl(handle, FsctlSetReparsePoint, data, data.Length, null!, 0, out _, IntPtr.Zero))
@@ -58,6 +62,23 @@ internal static class FileLinks
         try
         {
             File.CreateSymbolicLink(link, targetFile);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// False when Windows refuses, as for <see cref="TryCreateFileSymbolicLink"/>. A recursive delete removes the
+    /// link itself, without administrator rights and without following it.
+    /// </summary>
+    public static bool TryCreateDirectorySymbolicLink(string link, string targetFolder)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(link, targetFolder);
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
