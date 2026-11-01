@@ -92,6 +92,12 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
     `Dispose`, for example the window closing while auto-start was still creating the session, could create
     a kernel session that nothing would stop. `Start` now throws `ObjectDisposedException` after `Dispose`,
     and a faulted session is not restarted once the engine is disposed.
+  - A log could stay open on a disposed engine. `MonitorEngine.StartLog` creates the log before the engine
+    holds it, and `Dispose` ends only the log the engine holds, so when the app closed while **Record log**
+    was starting, the new log could keep its file open until the process ended; a `StartLog` after `Dispose`
+    did the same. `StartLog` now throws `ObjectDisposedException` once the engine is disposed, before it
+    creates anything, and when `Dispose` runs while the log is being created, `StartLog` closes that log
+    itself and throws.
   - A failure in the trace session's constructor is reported as a readable `MonitorStartException` instead
     of reaching the caller as a raw exception.
   - Each file's process-list text is cached and rebuilt only when a new process name arrives, so statistics
@@ -251,8 +257,20 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
     which refuses a link at the folder itself, and holds it open until the log ends, so the folder cannot be
     renamed, deleted or replaced meanwhile. Every file is created, emptied and deleted relative to that
     folder, never by path, and a name that is a link, a folder or a file with more than one name is refused:
-    the log does not start, or stops, with an error that names the file. Junctions in the folders above the
-    log's folder are still followed.
+    the log does not start, or stops, with an error that names the file. Links in the folders above the log's
+    folder are still followed for `drivemon --csv`, whose path the user chooses; for the app's **Record log**,
+    see the next entry.
+  - The app's **Record log** writes to `%LOCALAPPDATA%\DriveMonitor\Logs`, and any program the user runs
+    without elevation can put a junction in place of `%LOCALAPPDATA%\DriveMonitor` between two logs. The log
+    created its folder by path and refused a link only at that folder itself, so the elevated app's next log
+    was written wherever the junction led, and could empty a plain file there that already had exactly the
+    log's name. The new `LinkSafeFolder.OpenBelow(trustedRoot, path, create)` opens a root that the caller
+    trusts by its path, then opens, or creates, each folder below it relative to its parent's handle without
+    following a junction, symbolic link or other reparse point, and names the first one it refuses, for
+    example *'...\DriveMonitor' is a junction, symbolic link or other reparse point; it is not followed.* A
+    path outside the root throws `ArgumentException` before anything is opened. `CsvActivityLog` and
+    `MonitorEngine.StartLog` take a new optional last parameter, `trustedRoot`, and with one open the log's
+    folder that way; without one, as for `drivemon --csv`, nothing changes.
   - Process names come from the kernel trace, from Windows and from command lines, which whoever starts a
     process chooses, so a name could carry control characters or a bidirectional override into the app, the
     CSV export and the CSV log (`invoice` + U+202E + `txt.exe` reads as `invoiceexe.txt`). The engine now
@@ -279,6 +297,20 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
     or delete other files as administrator. Both files are now written through the new `LinkSafeFolder`,
     which refuses junctions, symbolic links and hard-linked files and checks the handles that it then uses;
     `errors.log` is emptied instead of deleted once it passes 1 MiB.
+  - The app followed a junction at `%LOCALAPPDATA%\DriveMonitor`: as administrator, **Record log** wrote its
+    log and **Open logs folder** created its folder wherever the junction led, the app read `settings.json`
+    from a file of another program's choosing (or, through `\RPC Control`, opened a named pipe or a device),
+    and after a failed start it renamed a file of that program's choosing over another when it moved
+    `settings.json` to `settings.bad.json` by path. Record log, Open logs folder, the settings (read, saved
+    and set aside) and `errors.log` now all open their folder with `LinkSafeFolder.OpenBelow` from
+    `%LOCALAPPDATA%` (`SettingsStore.TrustedRoot`), and `settings.json` is read and renamed through that
+    folder, never by path. A junction, symbolic link or mount point at `DriveMonitor` or `Logs` now stops
+    **Record log** (*Could not start the activity log:* and the message that names the link) and
+    **Open logs folder** (*Could not open the logs folder: ...*); before, Record log refused only a link at
+    `Logs` itself, and Open logs folder none. A `settings.json` that is a link or a hard link, or a junction
+    at `DriveMonitor`, is no longer read: the app starts with the defaults. `%LOCALAPPDATA%` itself is trusted
+    as Windows reports it; the user can redirect it without administrator rights, and the app follows that
+    redirection.
   - Any program in the user's Windows session could keep the app from starting by holding the mutex
     `Local\DriveMonitor.App.SingleInstance` ("DriveMonitor is already running."). The app now gives way only
     when another elevated process with its own image name runs in the same Windows session.
