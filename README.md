@@ -353,10 +353,10 @@ DELETE, RENAME, SETINFO (metadata changes), FLUSH and LIST. For example:
 By default `drivemon` prints reads, writes, creates, deletes and renames; the options above add the rest.
 Control characters and Unicode bidirectional formatting characters in paths, process names and details are
 printed as `?`, so that a file or program name cannot overwrite or fake a line. `--list` and the
-`Now monitoring` line do the same for volume labels and drive models, and so do the lines that carry a path
-or a message: the start warning, the CSV log's lines, a start failure, and the kernel session's fault and
-restart messages. The engine already replaces these characters in process names, so the app and the CSV files
-show them as `?` too.
+`Now monitoring` line do the same for volume labels and drive models, and so do the start warning, the CSV
+log's lines, the reason live monitoring could not start, and the kernel session's fault and restart
+messages. The engine already replaces these characters in process names, so the app and the CSV files show
+them as `?` too.
 
 ## The self-test
 
