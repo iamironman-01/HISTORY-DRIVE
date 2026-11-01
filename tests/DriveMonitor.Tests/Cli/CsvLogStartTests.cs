@@ -77,6 +77,23 @@ public sealed class CsvLogStartTests
         AssertOneLine(error.ToString());
     }
 
+    [Fact]
+    public void TryStartLog_PathWithABidiOverride_IsShownCleaned()
+    {
+        // A folder given as the log file, whose name carries a right-to-left override; the error quotes the path.
+        using var temp = new TempDirectory();
+        string path = Directory.CreateDirectory(temp.PathOf("invoice‮txt.exe")).FullName;
+        using var engine = new MonitorEngine();
+        var error = new StringWriter();
+
+        Assert.False(LiveMonitor.TryStartLog(engine, path, error));
+
+        string text = error.ToString();
+        AssertOneLine(text);
+        Assert.Contains("invoice?txt.exe", text);
+        Assert.DoesNotContain('‮', text);
+    }
+
     private static void AssertOneLine(string text)
     {
         Assert.StartsWith("Cannot write the CSV file: ", text);

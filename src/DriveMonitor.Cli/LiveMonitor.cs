@@ -76,11 +76,10 @@ internal static class LiveMonitor
         };
         engine.Faulted += (_, error) =>
         {
-            Console.Error.WriteLine($"Monitoring stopped: {error.Message}");
+            Console.Error.WriteLine(FaultedLine(error));
             stop.Cancel();
         };
-        engine.Restarted += (_, error) =>
-            Console.Error.WriteLine($"The kernel session stopped ({error.Message}) and was restarted; some events may be missing.");
+        engine.Restarted += (_, error) => Console.Error.WriteLine(RestartedLine(error));
 
         try
         {
@@ -88,7 +87,7 @@ internal static class LiveMonitor
         }
         catch (MonitorStartException ex)
         {
-            Console.Error.WriteLine(ex.Message);
+            Console.Error.WriteLine(ConsoleText.Clean(ex.Message));
             return 1;
         }
 
@@ -102,7 +101,7 @@ internal static class LiveMonitor
         else
             Console.WriteLine("Waiting for a drive to be plugged in - press Ctrl+C to stop.");
         if (engine.Log is { } log)
-            Console.WriteLine($"Writing every event to {log.FilePath}");
+            Console.WriteLine($"Writing every event to {ConsoleText.Clean(log.FilePath)}");
         Console.WriteLine();
 
         var printer = new EventPrinter(options);
@@ -141,6 +140,13 @@ internal static class LiveMonitor
     /// <summary>1 when the CSV log stopped on an error, so that rows the user asked for are missing from it; otherwise 0.</summary>
     internal static int ExitCode(CsvLogStatus? log) => log is { Failed: true } ? 1 : 0;
 
+    /// <summary>The line for a kernel session that stopped for good. The message can quote a file name.</summary>
+    internal static string FaultedLine(Exception error) => $"Monitoring stopped: {ConsoleText.Clean(error.Message)}";
+
+    /// <summary>The line for a kernel session that stopped and was started again. The message can quote a file name.</summary>
+    internal static string RestartedLine(Exception error) =>
+        $"The kernel session stopped ({ConsoleText.Clean(error.Message)}) and was restarted; some events may be missing.";
+
     /// <summary>
     /// Says on <paramref name="error"/>, in one line, what a successful start went ahead despite
     /// (<see cref="MonitorEngine.StartWarning"/>), such as a session guard another program holds; nothing when null.
@@ -164,7 +170,7 @@ internal static class LiveMonitor
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            error.WriteLine($"Cannot write the CSV file: {ex.Message}");
+            error.WriteLine($"Cannot write the CSV file: {ConsoleText.Clean(ex.Message)}");
             return false;
         }
     }
