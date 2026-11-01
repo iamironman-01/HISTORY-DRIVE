@@ -96,8 +96,8 @@ Nothing has been released yet; the version in `Directory.Build.props` is 0.1.0.
     holds it, and `Dispose` ends only the log the engine holds, so when the app closed while **Record log**
     was starting, the new log could keep its file open until the process ended; a `StartLog` after `Dispose`
     did the same. `StartLog` now throws `ObjectDisposedException` once the engine is disposed, before it
-    creates anything, and when `Dispose` runs while the log is being created, `StartLog` closes that log
-    itself and throws.
+    creates anything. It looks again once the engine holds the new log, and when the engine was disposed
+    meanwhile, it closes that log itself if `Dispose` has not, and throws.
   - A failure in the trace session's constructor is reported as a readable `MonitorStartException` instead
     of reaching the caller as a raw exception.
   - Each file's process-list text is cached and rebuilt only when a new process name arrives, so statistics
