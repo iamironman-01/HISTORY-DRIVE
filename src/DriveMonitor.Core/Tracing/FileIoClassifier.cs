@@ -219,10 +219,16 @@ internal static class FileIoClassifier
             : (FileOperation.Delete, null, FileEventFlags.None);
     }
 
-    /// <summary>The reported rename/link target, if it is a DOS path that differs from the old path.</summary>
+    /// <summary>
+    /// The reported rename/link target, if it is a DOS path on the operation's own drive that differs from the
+    /// old path. Neither a rename nor a hard link can leave its volume, so a target on another drive can only be
+    /// the path event of an unrelated operation matched to this one (request addresses are recycled within
+    /// microseconds); the operation is then reported without a target rather than with a wrong one.
+    /// </summary>
     private static string? TargetOf(PendingIo io) =>
         io.TargetPath is { Length: >= 3 } target
         && target[1] == ':'
+        && char.ToUpperInvariant(target[0]) == char.ToUpperInvariant(io.Drive)
         && !string.Equals(target, io.Path, StringComparison.OrdinalIgnoreCase)
             ? target
             : null;
