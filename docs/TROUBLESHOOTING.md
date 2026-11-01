@@ -341,12 +341,12 @@ Cannot write the CSV file: 'E:\logs\activity.csv' has other names (hard links); 
 ```
 
 Replace the link with a plain folder or file, or give `drivemon` another path. For **Record log**, remove the
-junction or link at `%LOCALAPPDATA%\DriveMonitor` or `Logs`: deleting a junction leaves the folder it points
-to alone, and the app creates a plain folder again when it needs one (see
-[Where logs and settings live](#where-logs-and-settings-live)). `drivemon --csv` does not check the folders
-above the folder of its file: a junction there is followed, not refused. While a log runs, its folder cannot
-be renamed or deleted. An old file of the log whose name a link has taken over is not deleted, so the folder
-can then hold more than 10 files of the log.
+junction or link at `%LOCALAPPDATA%\DriveMonitor` or `Logs`, for example with `rmdir` in a command prompt,
+which removes only the link and not the folder it points to; the app creates a plain folder again when it
+needs one (see [Where logs and settings live](#where-logs-and-settings-live)). `drivemon --csv` does not
+check the folders above the folder of its file: a junction there is followed, not refused. While a log runs,
+its folder cannot be renamed or deleted. An old file of the log whose name a link has taken over is not
+deleted, so the folder can then hold more than 10 files of the log.
 
 ## The self-test's folder
 
@@ -399,7 +399,8 @@ opens its `Logs` subfolder.
   `settings.bad.json` and `errors.log` when they are a link or a file with more than one name (a hard link).
   When it cannot read the settings, it starts with the defaults; Record log and Open logs folder show *Could
   not start the activity log: ...* and *Could not open the logs folder: ...* with the path of the link. Close
-  DriveMonitor and remove the junction or link; deleting a junction leaves the folder it points to alone. The
+  DriveMonitor and remove the junction or link in a command prompt, with `rmdir` for a folder or `del` for a
+  file; both remove only the link, not what it points to. The
   app creates a plain folder again when it next writes there. To keep your settings, create
   `%LOCALAPPDATA%\DriveMonitor` yourself first and copy `settings.json` into it from the folder the junction
   pointed to. A link at `%LOCALAPPDATA%` itself, or above it, is followed.

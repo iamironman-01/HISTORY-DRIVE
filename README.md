@@ -252,11 +252,12 @@ Screen readers read each new banner out.
   or a file with more than one name (a hard link), the log does not start, or stops, with a banner that names
   the path, such as *Could not start the activity log: '...\DriveMonitor' is a junction, symbolic link or
   other reparse point; it is not followed.* **Open logs folder** refuses such a folder in the same way (*Could
-  not open the logs folder: ...*). Remove the junction or link (deleting a junction leaves the folder it
-  points to alone), and the app creates a plain folder in its place when it needs one; see
-  [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#where-logs-and-settings-live). While a recording runs, its
-  folder cannot be renamed or deleted. `drivemon --csv` refuses links in the same way at the folder of its
-  file and at the file names, but follows links in the folders above it, on the path you chose.
+  not open the logs folder: ...*). Remove the junction or link, for example with `rmdir` in a command prompt,
+  which removes only the link and not the folder it points to; the app creates a plain folder in its place when
+  it needs one (see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#where-logs-and-settings-live)). While a
+  recording runs, its folder cannot be renamed or deleted. `drivemon --csv` refuses links in the same way at
+  the folder of its file and at the file names, but follows links in the folders above it, on the path you
+  chose.
 - Closing the window while recording saves the log first: the window stays open with the banner *Saving the
   activity log… DriveMonitor closes when it is done.* and closes by itself once the log is saved, which can
   take up to 30 seconds on a slow drive. When Windows logs off or shuts down, DriveMonitor waits at most 3

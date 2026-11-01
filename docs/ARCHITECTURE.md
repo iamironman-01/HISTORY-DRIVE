@@ -770,7 +770,7 @@ exhaust memory or fill a drive.
   that way and starts File Explorer only when that succeeds. The root is trusted: the user can redirect it
   without administrator rights, through the value `Local AppData` under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders`, and the app follows that
-  redirection but no link below it. Every name it uses there is fixed.
+  redirection but no link below it. The app chooses every name it uses there.
 
   `LinkSafeFolder` checks the handles it then uses rather than paths, so a link swapped in after a check gains
   nothing. `Open` opens a folder by its path with `FILE_FLAG_OPEN_REPARSE_POINT`, refuses it when it is a
