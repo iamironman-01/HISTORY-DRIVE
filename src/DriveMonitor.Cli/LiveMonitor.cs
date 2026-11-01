@@ -92,9 +92,7 @@ internal static class LiveMonitor
             return 1;
         }
 
-        // Start went ahead despite something the user should know, such as a session guard another program holds.
-        if (engine.StartWarning is { } warning)
-            Console.Error.WriteLine(ConsoleText.Clean(warning));
+        ReportStartWarning(engine.StartWarning, Console.Error);
 
         string letters = string.Join(", ", selected.Select(d => d + ":"));
         if (watcher is null)
@@ -142,6 +140,16 @@ internal static class LiveMonitor
 
     /// <summary>1 when the CSV log stopped on an error, so that rows the user asked for are missing from it; otherwise 0.</summary>
     internal static int ExitCode(CsvLogStatus? log) => log is { Failed: true } ? 1 : 0;
+
+    /// <summary>
+    /// Says on <paramref name="error"/>, in one line, what a successful start went ahead despite
+    /// (<see cref="MonitorEngine.StartWarning"/>), such as a session guard another program holds; nothing when null.
+    /// </summary>
+    internal static void ReportStartWarning(string? warning, TextWriter error)
+    {
+        if (warning is not null)
+            error.WriteLine(ConsoleText.Clean(warning));
+    }
 
     /// <summary>
     /// Starts the CSV log, or says in one line why the file cannot be written (open in another program, a
