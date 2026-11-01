@@ -34,6 +34,7 @@ public sealed class CsvActivityLog : IDisposable
 
     private const int FreeSpaceCheckMs = 1000;
     private const int DiskFullHResult = unchecked((int)0x80070070);
+    private const string StalledMessage = "The drive stopped accepting the activity log; events not yet written were dropped.";
 
     /// <summary>The byte-order mark and the column header that start every part.</summary>
     private static readonly byte[] Header = EncodeHeader();
@@ -147,8 +148,10 @@ public sealed class CsvActivityLog : IDisposable
     public long Dropped => Interlocked.Read(ref _dropped);
 
     /// <summary>
-    /// The write error that stopped the log (e.g. its drive was removed), if any. Once it is set, every
-    /// earlier event is counted as written or dropped, and later events are counted as dropped.
+    /// The write error that stopped the log (e.g. its drive was removed), if any; it does not change once set.
+    /// By then every earlier event is counted as written or dropped, and later events are counted as dropped,
+    /// except when <see cref="Dispose"/> gave up on a drive that ignores cancellation: the rows of the call that
+    /// drive holds are counted when the call returns.
     /// </summary>
     public Exception? Error => _error;
 
@@ -182,7 +185,7 @@ public sealed class CsvActivityLog : IDisposable
     /// <summary>
     /// Writes what is still queued and closes the file. Waits as long as the drive keeps accepting data
     /// (at most 30 s); once it accepts nothing for <see cref="StallTimeout"/>, the rest is counted as
-    /// dropped and this returns without waiting for the stuck write. Never throws.
+    /// dropped, <see cref="Error"/> says so, and this returns without waiting for the stuck write. Never throws.
     /// </summary>
     public void Dispose()
     {
@@ -284,7 +287,7 @@ public sealed class CsvActivityLog : IDisposable
         catch (OperationCanceledException) when (abandon.IsCancellationRequested)
         {
             // Dispose gave up on a stalled drive.
-            error = new TimeoutException("The drive stopped accepting the activity log; events not yet written were dropped.");
+            error = new TimeoutException(StalledMessage);
         }
         catch (Exception ex)
         {
@@ -302,8 +305,9 @@ public sealed class CsvActivityLog : IDisposable
             _folder.Dispose();
             _row.Dispose();
 
-            // Last, so a caller that sees the error also sees the final counts.
-            _error = error;
+            // Last, so a caller that sees the error also sees the final counts; kept if Dispose, giving up
+            // on this task, has set it already.
+            Interlocked.CompareExchange(ref _error, error, null);
         }
     }
 
@@ -416,7 +420,13 @@ public sealed class CsvActivityLog : IDisposable
         // Cancelling normally ends the stuck write at once. A driver that ignores it keeps the pump
         // waiting; the pump then counts its own unwritten rows when the write finally returns.
         if (!WaitForPump(TimeSpan.FromSeconds(1)))
+        {
             DropQueued();
+
+            // Not left to the pump, which may never return: whoever stopped the log reads Error now to
+            // learn that it did not write everything.
+            Interlocked.CompareExchange(ref _error, new TimeoutException(StalledMessage), null);
+        }
     }
 
     private bool WaitForPump(TimeSpan timeout)

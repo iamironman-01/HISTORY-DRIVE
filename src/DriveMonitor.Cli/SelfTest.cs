@@ -201,6 +201,9 @@ internal static class SelfTest
             }
 
             say($"Session started in {startClock.ElapsedMilliseconds} ms; waiting for it to settle...");
+
+            LiveMonitor.ReportStartWarning(engine.StartWarning, Console.Error);
+
             if (interruptions.Wait(TimeSpan.FromSeconds(2)))
                 return false;
 

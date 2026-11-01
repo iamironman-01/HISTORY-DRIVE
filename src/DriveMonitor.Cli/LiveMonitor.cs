@@ -65,6 +65,9 @@ internal static class LiveMonitor
         if (options.CsvPath is not null && !TryStartLog(engine, options.CsvPath, Console.Error))
             return 1;
 
+        // drivemon never replaces its log, so this is the one the engine writes to until the end.
+        CsvLogStatus? logStatus = engine.Log is { } csvLog ? new CsvLogStatus(csvLog) : null;
+
         using var stop = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
         {
@@ -88,6 +91,8 @@ internal static class LiveMonitor
             Console.Error.WriteLine(ex.Message);
             return 1;
         }
+
+        ReportStartWarning(engine.StartWarning, Console.Error);
 
         string letters = string.Join(", ", selected.Select(d => d + ":"));
         if (watcher is null)
@@ -118,13 +123,32 @@ internal static class LiveMonitor
                     nextFullDriveCheck = running.Elapsed + FullDriveCheckInterval;
                 AddNewDrives(watcher, full);
             }
+
+            // A log that failed refuses the later events; monitoring goes on without it.
+            logStatus?.ReportFailure(Console.Error);
         }
 
         engine.Stop();
         Flush(engine, printer, buffer);
+
+        // Before the summary, which needs the log's final counts.
+        logStatus?.Finish(engine.StopLog, Console.Out, Console.Error);
         if (!options.NoSummary)
-            PrintSummary(engine);
-        return 0;
+            PrintSummary(engine, logStatus);
+        return ExitCode(logStatus);
+    }
+
+    /// <summary>1 when the CSV log stopped on an error, so that rows the user asked for are missing from it; otherwise 0.</summary>
+    internal static int ExitCode(CsvLogStatus? log) => log is { Failed: true } ? 1 : 0;
+
+    /// <summary>
+    /// Says on <paramref name="error"/>, in one line, what a successful start went ahead despite
+    /// (<see cref="MonitorEngine.StartWarning"/>), such as a session guard another program holds; nothing when null.
+    /// </summary>
+    internal static void ReportStartWarning(string? warning, TextWriter error)
+    {
+        if (warning is not null)
+            error.WriteLine(ConsoleText.Clean(warning));
     }
 
     /// <summary>
@@ -194,7 +218,7 @@ internal static class LiveMonitor
             printer.Print(ev);
     }
 
-    private static void PrintSummary(MonitorEngine engine)
+    private static void PrintSummary(MonitorEngine engine, CsvLogStatus? log)
     {
         Console.WriteLine();
         Console.WriteLine("=== Drives ===");
@@ -229,6 +253,9 @@ internal static class LiveMonitor
                 $"Callback errors: {engine.CallbackErrors:N0} (last: {ConsoleText.Clean(engine.LastCallbackError ?? "-")})  " +
                 $"session restarts: {engine.Restarts}");
         }
+
+        if (log is not null)
+            Console.WriteLine(log.SummaryLine());
     }
 }
 
