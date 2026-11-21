@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup Label="DriveMonitor.Core">
-    <PackageVersion Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="4.0.0" />
+    <PackageVersion Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="4.0.2" />
   </ItemGroup>
 
   <ItemGroup Label="DriveMonitor.Tests">
